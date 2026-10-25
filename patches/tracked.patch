@@ -1,0 +1,1502 @@
+diff --git a/packages/app/e2e/regression/tabs.spec.ts b/packages/app/e2e/regression/tabs.spec.ts
+index 9d1c75a..488f591 100644
+--- a/packages/app/e2e/regression/tabs.spec.ts
++++ b/packages/app/e2e/regression/tabs.spec.ts
+@@ -24,6 +24,199 @@ const c = { id: "ses_tab_c", title: "Tab C session" }
+ 
+ test.use({ serviceWorkers: "block" })
+ 
++test("session sidebar groups history and restores the original tab layout", async ({ page }) => {
++  const permission = {
++    id: "permission-sidebar",
++    sessionID: b.id,
++    action: "shell",
++    resources: ["git status"],
++    metadata: {},
++    save: [],
++  }
++  const requests = [permission]
++  const workspace = await openSession(page, {
++    name: "Sidebar",
++    sessions: [a, b, { ...c, time: { created: 1, updated: 2, idle: 2 } }],
++    sessionID: a.id,
++    sessionStatus: { [b.id]: { type: "busy" } },
++    permissions: () => requests,
++    sessionPermissions: { [b.id]: requests },
++    seed: {
++      tabs: [a.id],
++      settings: { appearance: { tabLayout: "vertical" } },
++      storage: { "opencode.global.dat:session-sidebar.v1": { enabled: true } },
++    },
++  })
++
++  const sidebar = page.getByRole("complementary", { name: "Sessions", exact: true })
++  await expect(page.locator("[data-titlebar-tab-slot]:visible")).toHaveCount(0)
++  await expect(sidebar.getByRole("heading", { name: "Needs input", exact: true })).toBeVisible()
++  await expect(sidebar.getByRole("heading", { name: "Idle", exact: true })).toBeVisible()
++  await expect(sidebar.getByRole("heading", { name: "Ready to review", exact: true })).toHaveCount(0)
++  await expect(sidebar.locator('[data-slot="session-sidebar-unread-dot"]')).toHaveCount(1)
++  await expect(sidebar.getByRole("button", { name: /Tab B session/ })).toBeVisible()
++
++  const viewRequest = page.waitForRequest(
++    (request) =>
++      request.method() === "POST" && new URL(request.url()).pathname === `/api/session/${c.id}/view`,
++  )
++  await sidebar.locator('[data-action="sidebar-filter-menu"]').click()
++  await page.getByRole("menuitem", { name: "Mark all as read", exact: true }).click()
++  await viewRequest
++  await expect(sidebar.locator('[data-slot="session-sidebar-unread-dot"]')).toHaveCount(0)
++  const newer = { ...permission, id: "permission-sidebar-newer" }
++  requests.push(newer)
++  await workspace.push([
++    {
++      id: "evt_sidebar_permission_asked",
++      type: "permission.asked",
++      created: Date.now(),
++      location: { directory: workspace.directory },
++      data: newer,
++    },
++  ])
++  requests.splice(requests.indexOf(newer), 1)
++  const refreshedRequests = page.waitForResponse(
++    (response) =>
++      response.request().method() === "GET" && new URL(response.url()).pathname === `/api/session/${b.id}/permission`,
++  )
++  await workspace.push([
++    {
++      id: "evt_sidebar_newer_replied",
++      type: "permission.replied",
++      created: Date.now(),
++      location: { directory: workspace.directory },
++      data: { sessionID: b.id, requestID: newer.id, reply: "once" },
++    },
++  ])
++  await refreshedRequests
++  await expect(sidebar.getByRole("heading", { name: "Needs input", exact: true })).toBeVisible()
++  requests.splice(0)
++  await workspace.push([
++    {
++      id: "evt_sidebar_permission_replied",
++      type: "permission.replied",
++      created: Date.now(),
++      location: { directory: workspace.directory },
++      data: { sessionID: b.id, requestID: permission.id, reply: "once" },
++    },
++  ])
++  await expect(sidebar.getByRole("heading", { name: "Needs input", exact: true })).toHaveCount(0)
++  await expect(sidebar.getByRole("heading", { name: "Working", exact: true })).toBeVisible()
++
++  const archived = workspace.sessions.find((item) => item.id === c.id)!
++  archived.time = { ...(archived.time as Record<string, number>), archived: Date.now() }
++  await workspace.push([
++    {
++      id: "evt_sidebar_archived",
++      type: "session.archived",
++      created: Date.now(),
++      location: { directory: workspace.directory },
++      data: { sessionID: c.id },
++    },
++  ])
++  await expect(sidebar.getByRole("button", { name: /Tab C session/ })).toHaveCount(0)
++  await sidebar.getByRole("combobox", { name: "Session visibility", exact: true }).selectOption("archived")
++  await expect(sidebar.getByRole("button", { name: /Tab C session/ })).toBeVisible()
++  await sidebar.getByRole("combobox", { name: "Session visibility", exact: true }).selectOption("active")
++  await sidebar.getByRole("combobox", { name: "Group sessions by", exact: true }).selectOption("time")
++  await expect(sidebar.getByRole("heading", { name: "Older", exact: true })).toBeVisible()
++  await sidebar.getByRole("combobox", { name: "Group sessions by", exact: true }).selectOption("project")
++  await expect(sidebar.getByRole("heading", { name: "Sidebar", exact: true })).toBeVisible()
++
++  // Pinning a session shows the Pinned section and persists across switches
++  const rowBWrapper = sidebar.locator('[data-slot="session-sidebar-row-wrapper"]').filter({
++    has: page.locator(`[data-session-id="${b.id}"]`),
++  })
++  await rowBWrapper.first().hover()
++  await rowBWrapper.first().getByRole("button", { name: "Pin session", exact: true }).click()
++  await expect(sidebar.getByRole("heading", { name: "Pinned", exact: true })).toBeVisible()
++  const pinnedSection = sidebar.locator('[data-slot="session-sidebar-pinned"]')
++  await expect(pinnedSection.getByRole("button", { name: /Tab B session/ })).toBeVisible()
++  await pinnedSection.getByRole("button", { name: "Unpin session", exact: true }).click({ force: true })
++  await expect(sidebar.getByRole("heading", { name: "Pinned", exact: true })).toHaveCount(0)
++
++  await sidebar.getByRole("searchbox", { name: "Search sessions", exact: true }).fill(b.title)
++  await expect(sidebar.getByRole("button", { name: /Tab A session/ })).toHaveCount(0)
++  await expect(sidebar.getByRole("button", { name: /Tab C session/ })).toHaveCount(0)
++  await sidebar.getByRole("button", { name: /Tab B session/ }).click()
++  await expectPath(page, sessionHref(b.id))
++  await expectSessionTitle(page, b.title)
++
++  await sidebar.getByRole("button", { name: "Restore tabs", exact: true }).click()
++  await expect(sidebar).toBeHidden()
++  await expect(page.locator('[data-slot="vertical-tabs-sidebar"]')).toBeVisible()
++  const modifier = await page.evaluate(() => (/Mac/.test(navigator.platform) ? "Meta" : "Control"))
++  await page.keyboard.press(`${modifier}+Shift+b`)
++  await expect(sidebar).toBeVisible()
++  await expect(sidebar.getByRole("searchbox", { name: "Search sessions", exact: true })).toHaveValue(b.title)
++  await page.reload()
++  await expect(sidebar.getByRole("searchbox", { name: "Search sessions", exact: true })).toHaveValue(b.title)
++  await expect(sidebar.getByRole("combobox", { name: "Group sessions by", exact: true })).toHaveValue("project")
++})
++
++test("split view supports 2-pane (left/right) and 3-pane (left/middle/right) independent sessions", async ({ page }) => {
++  await openSession(page, {
++    name: "SplitRepo",
++    sessions: [a, b, c],
++    sessionID: a.id,
++    seed: {
++      tabs: [a.id, b.id, c.id],
++      storage: { "opencode.global.dat:session-sidebar.v1": { enabled: true } },
++    },
++  })
++
++  const sidebar = page.getByRole("complementary", { name: "Sessions", exact: true })
++  await expect(sidebar).toBeVisible()
++
++  // Initially in 1-pane mode
++  await expect(page.locator('[data-slot="split-workbench"]')).toHaveCount(0)
++
++  // Open session B in split view (1 -> 2 panes: Left = A, Right = B)
++  const rowB = sidebar.locator('[data-slot="session-sidebar-row-wrapper"]').filter({
++    has: page.locator(`[data-session-id="${b.id}"]`),
++  })
++  await rowB.first().hover()
++  await rowB.first().locator('[data-action="sidebar-open-split"]').click()
++
++  const workbench = page.locator('[data-slot="split-workbench"]')
++  await expect(workbench).toBeVisible()
++  await expect(workbench).toHaveAttribute("data-pane-count", "2")
++  await expect(workbench.locator('[data-slot="split-pane"]')).toHaveCount(2)
++  await expect(workbench.locator('[data-slot="split-pane-position"]')).toHaveText(["Left", "Right"])
++  await expect(workbench.locator('[data-slot="split-pane-title"]')).toHaveText([a.title, b.title])
++
++  // Open session C in split view (2 -> 3 panes: Left = A, Middle = B, Right = C)
++  const rowC = sidebar.locator('[data-slot="session-sidebar-row-wrapper"]').filter({
++    has: page.locator(`[data-session-id="${c.id}"]`),
++  })
++  await rowC.first().hover()
++  await rowC.first().locator('[data-action="sidebar-open-split"]').click()
++
++  await expect(workbench).toHaveAttribute("data-pane-count", "3")
++  await expect(workbench.locator('[data-slot="split-pane"]')).toHaveCount(3)
++  await expect(workbench.locator('[data-slot="split-pane-position"]')).toHaveText(["Left", "Middle", "Right"])
++  await expect(workbench.locator('[data-slot="split-pane-title"]')).toHaveText([a.title, b.title, c.title])
++
++  // Sidebar badges show L, M, R for the 3 open sessions
++  await expect(sidebar.locator('[data-slot="session-sidebar-pane-badge"]')).toHaveText(["L", "M", "R"])
++
++  // Move middle pane left -> order becomes [B, A, C]
++  const middlePane = workbench.locator('[data-slot="split-pane"]').nth(1)
++  await middlePane.locator('[data-action="split-pane-move-left"]').click()
++  await expect(workbench.locator('[data-slot="split-pane-title"]')).toHaveText([b.title, a.title, c.title])
++
++  // Close the right pane -> back to 2 panes [B, A]
++  const rightPane = workbench.locator('[data-slot="split-pane"]').nth(2)
++  await rightPane.locator('[data-action="split-pane-close"]').click()
++  await expect(workbench).toHaveAttribute("data-pane-count", "2")
++  await expect(workbench.locator('[data-slot="split-pane-title"]')).toHaveText([b.title, a.title])
++
++  // Switch back to single pane via layout switcher
++  await sidebar.locator('[data-action="split-layout-1"]').click()
++  await expect(page.locator('[data-slot="split-workbench"]')).toHaveCount(0)
++})
++
+ test("tab strip keeps draft tabs as wide as session tabs and navigates on mouse down", async ({ page }) => {
+   const workspace = await mockWorkspace(page, {
+     name: "Tabs",
+@@ -908,6 +1101,94 @@ test("the Windows titlebar menu pastes through the desktop edit action", async (
+   await expect(page.getByRole("status", { name: "Desktop menu actions" })).toHaveText("edit.paste")
+ })
+ 
++test("split view supports dragging sessions into left/middle/right panes and dragging pane headers to reorder", async ({
++  page,
++}) => {
++  await page.setViewportSize({ width: 1440, height: 900 })
++  await mockWorkspace(page, {
++    name: "SplitDragWorkspace",
++    sessions: [a, b, c],
++    seed: {
++      storage: { "opencode.global.dat:session-sidebar.v1": { enabled: true } },
++    },
++  })
++  await page.goto(sessionHref(a.id))
++  await expectPath(page, sessionHref(a.id))
++
++  // Initially in 1-pane mode
++  await expect(page.locator('[data-slot="split-workbench"]')).toHaveCount(0)
++
++  const rowB = page.locator(`[data-slot="session-sidebar-row"][data-session-id="${b.id}"]`)
++  const rowC = page.locator(`[data-slot="session-sidebar-row"][data-session-id="${c.id}"]`)
++  const workbenchHost = page.locator('[data-slot="split-workbench-host"]')
++
++  await expect(rowB).toBeVisible()
++  await expect(rowC).toBeVisible()
++
++  // Drag Session B from sidebar into the Right drop zone of the workbench (while in 1-pane mode)
++  const rowBBox = (await rowB.boundingBox())!
++  const hostBox = (await workbenchHost.boundingBox())!
++
++  await page.mouse.move(rowBBox.x + rowBBox.width / 2, rowBBox.y + rowBBox.height / 2)
++  await page.mouse.down()
++  await page.mouse.move(hostBox.x + hostBox.width * 0.75, hostBox.y + hostBox.height * 0.5, { steps: 8 })
++
++  // In 1-pane mode, only 2 drop zones (Left / Right) should appear
++  await expect(page.locator('[data-slot="split-drop-overlay"]')).toBeVisible()
++  await expect(page.locator('[data-slot="split-drop-overlay"]')).toHaveAttribute("data-zone-count", "2")
++  await expect(page.locator('[data-slot="split-drop-zone"]')).toHaveCount(2)
++  await expect(page.locator('[data-slot="split-drop-zone"][data-drop-position="middle"]')).toHaveCount(0)
++  await expect(page.locator('[data-slot="split-drag-preview"]')).toBeVisible()
++  await expect(page.locator('[data-slot="split-drop-zone"][data-drop-position="right"]')).toHaveAttribute(
++    "data-active",
++    "true",
++  )
++
++  await page.screenshot({
++    path: "/Users/mac/.gemini/antigravity/brain/e7d55b92-6430-4f0c-85c1-de66f545535c/split-view-drag-overlay.png",
++  })
++
++  await page.mouse.up()
++
++  // Should now be in 2-pane mode: Left = Tab A session, Right = Tab B session
++  const panes = page.locator('[data-slot="split-pane"]')
++  await expect(panes).toHaveCount(2)
++  await expect(panes.nth(0).locator('[data-slot="split-pane-title"]')).toContainText("Tab A session")
++  await expect(panes.nth(1).locator('[data-slot="split-pane-title"]')).toContainText("Tab B session")
++
++  // In 2-pane mode, dragging Session C from sidebar should now display all 3 drop zones (Left / Middle / Right)
++  const rowCBox = (await rowC.boundingBox())!
++  await page.mouse.move(rowCBox.x + rowCBox.width / 2, rowCBox.y + rowCBox.height / 2)
++  await page.mouse.down()
++  await page.mouse.move(hostBox.x + hostBox.width * 0.5, hostBox.y + hostBox.height * 0.5, { steps: 8 })
++  await expect(page.locator('[data-slot="split-drop-overlay"]')).toHaveAttribute("data-zone-count", "3")
++  await expect(page.locator('[data-slot="split-drop-zone"]')).toHaveCount(3)
++  await expect(page.locator('[data-slot="split-drop-zone"][data-drop-position="middle"]')).toHaveAttribute(
++    "data-active",
++    "true",
++  )
++  await page.mouse.up()
++
++  // Should now be in 3-pane mode: Left = Tab A session, Middle = Tab C session, Right = Tab B session
++  await expect(panes).toHaveCount(3)
++  await expect(panes.nth(0).locator('[data-slot="split-pane-title"]')).toContainText("Tab A session")
++  await expect(panes.nth(1).locator('[data-slot="split-pane-title"]')).toContainText("Tab C session")
++  await expect(panes.nth(2).locator('[data-slot="split-pane-title"]')).toContainText("Tab B session")
++
++  // Drag Left pane header (Tab A session) to the Right drop zone to reorder panes
++  const leftHeader = panes.nth(0).locator('[data-slot="split-pane-header"]')
++  const leftHeaderBox = (await leftHeader.boundingBox())!
++  await page.mouse.move(leftHeaderBox.x + 80, leftHeaderBox.y + leftHeaderBox.height / 2)
++  await page.mouse.down()
++  await page.mouse.move(hostBox.x + hostBox.width * 0.85, hostBox.y + hostBox.height * 0.5, { steps: 8 })
++  await page.mouse.up()
++
++  // Order should now be: Left = Tab C session, Middle = Tab B session, Right = Tab A session
++  await expect(panes.nth(0).locator('[data-slot="split-pane-title"]')).toContainText("Tab C session")
++  await expect(panes.nth(1).locator('[data-slot="split-pane-title"]')).toContainText("Tab B session")
++  await expect(panes.nth(2).locator('[data-slot="split-pane-title"]')).toContainText("Tab A session")
++})
++
+ // Server A is the default origin; B is a remote that answers only for its own directories.
+ async function twoServers(
+   page: Page,
+diff --git a/packages/app/e2e/utils/app.ts b/packages/app/e2e/utils/app.ts
+index 2916bdf..b0f8ab8 100644
+--- a/packages/app/e2e/utils/app.ts
++++ b/packages/app/e2e/utils/app.ts
+@@ -103,6 +103,7 @@ function storageEntries(input: SeedInput): [string, string, boolean][] {
+   }
+ 
+   const values: Record<string, unknown> = {
++    "opencode.global.dat:session-sidebar.v1": { enabled: false },
+     ...(Object.keys(server).length ? { "opencode.global.dat:server": server } : {}),
+     ...(input.tabs ? { "opencode.window.browser.dat:tabs": input.tabs.map(tabEntry) } : {}),
+     ...(input.panes
+diff --git a/packages/app/e2e/utils/mock-api.ts b/packages/app/e2e/utils/mock-api.ts
+index 781d78f..898dc4a 100644
+--- a/packages/app/e2e/utils/mock-api.ts
++++ b/packages/app/e2e/utils/mock-api.ts
+@@ -424,6 +424,13 @@ const Group = HttpApiGroup.make("mock")
+       success: NoContent,
+     }),
+   )
++  .add(
++    HttpApiEndpoint.post("sessionView", "/api/session/:sessionID/view", {
++      params: SessionParams,
++      payload: JsonPayload,
++      success: NoContent,
++    }),
++  )
+   .add(
+     HttpApiEndpoint.post("sessionInterrupt", "/api/session/:sessionID/interrupt", {
+       params: SessionParams,
+diff --git a/packages/app/e2e/utils/mock-server.ts b/packages/app/e2e/utils/mock-server.ts
+index 4f557aa..1180a0e 100644
+--- a/packages/app/e2e/utils/mock-server.ts
++++ b/packages/app/e2e/utils/mock-server.ts
+@@ -1339,6 +1339,16 @@ function mockHandlers(
+ 
+             if (session && title !== undefined) session.title = title
+           }).pipe(Effect.andThen(noContent)),
++        sessionView: (ctx) =>
++          Effect.sync(() => {
++            const session = config.sessions.find((item) => item.id === ctx.params.sessionID)
++            const idle =
++              Predicate.isObject(ctx.payload) && typeof ctx.payload.idle === "number" ? ctx.payload.idle : undefined
++            if (session && idle !== undefined) {
++              const prevTime = Predicate.isObject(session.time) ? session.time : {}
++              session.time = { ...prevTime, viewed: idle }
++            }
++          }).pipe(Effect.andThen(noContent)),
+         sessionCommand: (ctx) => {
+           const recordCommand = config.onCommand
+ 
+diff --git a/packages/app/src/composer/attachments/attachments.ts b/packages/app/src/composer/attachments/attachments.ts
+index 5cc33dc..363a10b 100644
+--- a/packages/app/src/composer/attachments/attachments.ts
++++ b/packages/app/src/composer/attachments/attachments.ts
+@@ -3,6 +3,8 @@ import { createStore } from "solid-js/store"
+ import { makeEventListener } from "@solid-primitives/event-listener"
+ import { createBlobReference } from "@/runtime/persistence/drafts"
+ import { uuid } from "@/runtime/persistence/uuid"
++import { useSplitPane } from "@/shell/split-view/context"
++import { hasSessionDragMime } from "@/shell/split-view/workbench"
+ import type { ComposerPrompt } from "../types"
+ import type { ImageAttachmentPart, PathAttachmentPart } from "../state"
+ import type { AttachmentDestination } from "./destination"
+@@ -40,6 +42,8 @@ export function createComposerAttachments(
+     setDraggingType: (type: "image" | "@mention" | null) => void
+   },
+ ) {
++  const splitPane = useSplitPane()
++
+   const clearDrag = () => {
+     input.setDraggingType(null)
+   }
+@@ -201,6 +205,8 @@ export function createComposerAttachments(
+ 
+   const handleDrop = async (event: DragEvent) => {
+     if (input.isDialogActive()) return
++    if (hasSessionDragMime(event.dataTransfer)) return
++    if (splitPane && splitPane.count() > 1 && !splitPane.containsTarget(event.target)) return
+     event.preventDefault()
+     clearDrag()
+     const plainText = event.dataTransfer?.getData("text/plain")
+@@ -224,6 +230,11 @@ export function createComposerAttachments(
+     if (cancel) onCleanup(cancel)
+     makeEventListener(document, "dragover", (event) => {
+       if (input.isDialogActive()) return
++      if (hasSessionDragMime(event.dataTransfer)) return
++      if (splitPane && splitPane.count() > 1 && !splitPane.containsTarget(event.target)) {
++        clearDrag()
++        return
++      }
+       event.preventDefault()
+ 
+       if (event.dataTransfer?.types.includes("Files")) input.setDraggingType("image")
+diff --git a/packages/app/src/new-session/screen.tsx b/packages/app/src/new-session/screen.tsx
+index 30f28ad..cbd30ca 100644
+--- a/packages/app/src/new-session/screen.tsx
++++ b/packages/app/src/new-session/screen.tsx
+@@ -1,5 +1,6 @@
+ import { createPromptProjectController } from "@/new-session/project/selector"
+ import { useSettingsSurface } from "@/settings/surface"
++import { useSplitPane } from "@/shell/split-view/context"
+ import { useTabs, type DraftTab } from "@/shell/tabs/tabs"
+ import { useSettingsServers } from "@/settings/servers/inventory"
+ import { useSearchParams } from "@solidjs/router"
+@@ -15,6 +16,7 @@ import { createDraftMcpControls } from "./mcp"
+ /** The draft-only Session page. Submitting promotes the draft into a real Session. */
+ export default function NewSessionPage(props: { draftId: string }) {
+   const [search, setSearch] = useSearchParams<{ draftId?: string; prompt?: string }>()
++  const splitPane = useSplitPane()
+   const tabs = useTabs()
+   const servers = useSettingsServers()
+   const settingsSurface = useSettingsSurface()
+@@ -80,7 +82,7 @@ export default function NewSessionPage(props: { draftId: string }) {
+   // a stale cursor a frame after every key-up and yank the caret from a key pressed in that frame.
+   createEffect(
+     on(composer.ready, (ready) => {
+-      if (ready) model.restoreFocus()
++      if (ready && (!splitPane || splitPane.focused())) model.restoreFocus()
+     }),
+   )
+   createEffect(() => {
+diff --git a/packages/app/src/runtime/extension/mounted-session.ts b/packages/app/src/runtime/extension/mounted-session.ts
+index 0a95233..89bcc7a 100644
+--- a/packages/app/src/runtime/extension/mounted-session.ts
++++ b/packages/app/src/runtime/extension/mounted-session.ts
+@@ -29,6 +29,7 @@ import { sessionInWorkspace, sessionProject, type SessionModel } from "@/session
+ import { useFile } from "@/workspaces/files/model"
+ import { useWorkspaceLocation } from "@/workspaces/location"
+ import { pathKey } from "@/workspaces/path-key"
++import { useSplitPane } from "@/shell/split-view/context"
+ import { useExtensionAttachment } from "./host-apis"
+ 
+ const noTasks: readonly BackgroundTask[] = []
+@@ -47,6 +48,7 @@ export function createMountedSession(session: SessionModel) {
+   const server = useServer()
+   const location = useWorkspaceLocation()
+   const attachment = useExtensionAttachment()
++  const splitPane = useSplitPane()
+   // The composer region owns background tasks and is created after the view.
+   const [background, setBackground] = createSignal<Accessor<readonly BackgroundTask[]>>()
+ 
+@@ -246,12 +248,13 @@ export function createMountedSession(session: SessionModel) {
+   createRenderEffect(on(mounted, (view) => attachment.preload(view)))
+   // Publish both after render, with the original session-mount timing. Renders receive their own screen directly;
+   // only global observers need this attachment. One batch prevents exposing a view on another screen.
+-  createEffect(() =>
++  createEffect(() => {
++    if (splitPane && !splitPane.focused()) return
+     batch(() => {
+       onCleanup(attachment.screen(screen))
+       onCleanup(attachment.mount(mounted))
+-    }),
+-  )
++    })
++  })
+ 
+   return {
+     screen,
+diff --git a/packages/app/src/runtime/i18n/en.ts b/packages/app/src/runtime/i18n/en.ts
+index 6ee0b5a..0c349ac 100644
+--- a/packages/app/src/runtime/i18n/en.ts
++++ b/packages/app/src/runtime/i18n/en.ts
+@@ -2,6 +2,66 @@ import { DESKTOP_NATIVE_ENGLISH } from "./desktop-native"
+ 
+ export const dict = {
+   ...DESKTOP_NATIVE_ENGLISH,
++  "sessionSidebar.title": "Sessions",
++  "sessionSidebar.toggle": "Toggle session sidebar",
++  "sessionSidebar.restore": "Restore tabs",
++  "sessionSidebar.search": "Search sessions",
++  "sessionSidebar.groupBy": "Group sessions by",
++  "sessionSidebar.group.state": "By status",
++  "sessionSidebar.group.project": "By project",
++  "sessionSidebar.group.time": "By time",
++  "sessionSidebar.group.none": "None",
++  "sessionSidebar.status": "Session visibility",
++  "sessionSidebar.active": "Active",
++  "sessionSidebar.archived": "Archived",
++  "sessionSidebar.archivedOnly": "Archived only",
++  "sessionSidebar.project": "Filter by project",
++  "sessionSidebar.allProjects": "All projects",
++  "sessionSidebar.period": "Filter by time",
++  "sessionSidebar.allTime": "All time",
++  "sessionSidebar.day": "Last 24 hours",
++  "sessionSidebar.week": "Last 7 days",
++  "sessionSidebar.month": "Last 30 days",
++  "sessionSidebar.sort": "Sort sessions by",
++  "sessionSidebar.updated": "Last updated",
++  "sessionSidebar.created": "Created",
++  "sessionSidebar.filterMenu": "Filter and view options",
++  "sessionSidebar.filter": "Filter",
++  "sessionSidebar.display": "Display",
++  "sessionSidebar.showPath": "Show project subtitle",
++  "sessionSidebar.markAllRead": "Mark all as read",
++  "sessionSidebar.resetFilters": "Reset filters",
++  "sessionSidebar.pinned": "Pinned",
++  "sessionSidebar.newInProject": "New session in {{project}}",
++  "sessionSidebar.noServers": "No servers available",
++  "sessionSidebar.disconnected": "Waiting for server connection…",
++  "sessionSidebar.loading": "Loading sessions…",
++  "sessionSidebar.failed": "Some session data could not be loaded.",
++  "sessionSidebar.retry": "Retry",
++  "sessionSidebar.empty": "No matching sessions",
++  "sessionSidebar.more": "Load older sessions",
++  "sessionSidebar.untitled": "Untitled session",
++  "sessionSidebar.state.input": "Needs input",
++  "sessionSidebar.state.working": "Working",
++  "sessionSidebar.state.review": "Ready to review",
++  "sessionSidebar.state.idle": "Idle",
++  "sessionSidebar.time.today": "Today",
++  "sessionSidebar.time.yesterday": "Yesterday",
++  "sessionSidebar.time.week": "Previous 7 days",
++  "sessionSidebar.time.month": "Previous 30 days",
++  "sessionSidebar.time.older": "Older",
++  "sessionSidebar.action.stop": "Stop execution",
++  "sessionSidebar.action.pin": "Pin session",
++  "sessionSidebar.action.unpin": "Unpin session",
++  "sessionSidebar.action.rename": "Rename session",
++  "sessionSidebar.action.archive": "Archive session",
++  "sessionSidebar.action.unarchive": "Unarchive session",
++  "sessionSidebar.action.delete": "Delete session",
++  "sessionSidebar.action.openNewTab": "Open in new tab",
++  "sessionSidebar.action.markRead": "Mark as read",
++  "sessionSidebar.action.copyId": "Copy session ID",
++  "sessionSidebar.action.copyDirectory": "Copy working directory",
++  "sessionSidebar.action.more": "More actions",
+   "session.location.unavailable": "Session location unavailable",
+   "session.location.description": "Choose another directory to continue this session.",
+   "session.location.choose": "Choose directory",
+@@ -1046,6 +1106,40 @@ export const dict = {
+   "workspace.delete.confirm": "Delete “{{name}}”?",
+   "workspace.delete.location": "Location",
+   "workspace.delete.button": "Delete worktree",
++  "sessionSidebar.action.openSplit": "Open in split view",
++  "sessionSidebar.action.openSplitPosition": "Open in pane…",
++  "sessionSidebar.action.openSplitLeft": "Open in left pane",
++  "sessionSidebar.action.openSplitMiddle": "Open in middle pane",
++  "sessionSidebar.action.openSplitRight": "Open in right pane",
++  "splitView.switcher.label": "Split view layout",
++  "splitView.layout.single": "Single pane",
++  "splitView.layout.twoPanes": "Two panes (Left / Right)",
++  "splitView.layout.threePanes": "Three panes (Left / Middle / Right)",
++  "splitView.short.single": "1",
++  "splitView.short.twoPanes": "2",
++  "splitView.short.threePanes": "3",
++  "splitView.position.left": "Left",
++  "splitView.position.middle": "Middle",
++  "splitView.position.right": "Right",
++  "splitView.badge.left": "L",
++  "splitView.badge.middle": "M",
++  "splitView.badge.right": "R",
++  "splitView.pane.newSession": "New session in pane",
++  "splitView.pane.moveLeft": "Move pane left",
++  "splitView.pane.moveRight": "Move pane right",
++  "splitView.pane.maximize": "Maximize pane",
++  "splitView.pane.close": "Close pane",
++  "splitView.drop.left": "Open in Left Pane",
++  "splitView.drop.middle": "Open in Middle Pane",
++  "splitView.drop.right": "Open in Right Pane",
++  "splitView.command.single": "Switch to Single Pane",
++  "splitView.command.twoPanes": "Toggle Two-Pane Split View",
++  "splitView.command.threePanes": "Toggle Three-Pane Split View",
++  "splitView.command.splitRight": "Split Pane Right",
++  "splitView.command.closePane": "Close Focused Split Pane",
++  "splitView.command.focusPrev": "Focus Previous Split Pane",
++  "splitView.command.focusNext": "Focus Next Split Pane",
++  "splitView.command.equalize": "Equalize Split Pane Widths",
+ }
+ 
+ export default dict
+diff --git a/packages/app/src/runtime/i18n/zh.ts b/packages/app/src/runtime/i18n/zh.ts
+index b7d19c1..91600dd 100644
+--- a/packages/app/src/runtime/i18n/zh.ts
++++ b/packages/app/src/runtime/i18n/zh.ts
+@@ -3,6 +3,67 @@ import en from "./en"
+ type Keys = keyof typeof en
+ 
+ export const dict = {
++  "sessionSidebar.title": "会话",
++  "sessionSidebar.toggle": "切换会话侧边栏",
++  "sessionSidebar.restore": "恢复标签栏",
++  "sessionSidebar.search": "搜索会话…",
++  "sessionSidebar.groupBy": "分组方式",
++  "sessionSidebar.group.state": "按状态",
++  "sessionSidebar.group.project": "按项目",
++  "sessionSidebar.group.time": "按时间",
++  "sessionSidebar.group.none": "不分组",
++  "sessionSidebar.status": "会话可见性",
++  "sessionSidebar.active": "活跃",
++  "sessionSidebar.archived": "已归档",
++  "sessionSidebar.archivedOnly": "仅看已归档",
++  "sessionSidebar.project": "按项目筛选",
++  "sessionSidebar.allProjects": "全部项目",
++  "sessionSidebar.period": "按时间筛选",
++  "sessionSidebar.allTime": "全部时间",
++  "sessionSidebar.day": "最近 24 小时",
++  "sessionSidebar.week": "最近 7 天",
++  "sessionSidebar.month": "最近 30 天",
++  "sessionSidebar.sort": "排序方式",
++  "sessionSidebar.updated": "最近更新",
++  "sessionSidebar.created": "创建时间",
++  "sessionSidebar.filterMenu": "筛选与视图选项",
++  "sessionSidebar.filter": "筛选",
++  "sessionSidebar.display": "显示设置",
++  "sessionSidebar.showPath": "显示项目路径副标题",
++  "sessionSidebar.markAllRead": "全部标为已读",
++  "sessionSidebar.resetFilters": "重置筛选条件",
++  "sessionSidebar.pinned": "已置顶",
++  "sessionSidebar.newInProject": "在 {{project}} 中新建会话",
++  "sessionSidebar.noServers": "暂无可用服务器",
++  "sessionSidebar.disconnected": "正在等待服务器连接…",
++  "sessionSidebar.loading": "正在加载会话…",
++  "sessionSidebar.failed": "部分会话数据加载失败。",
++  "sessionSidebar.retry": "重试",
++  "sessionSidebar.empty": "没有匹配的会话",
++  "sessionSidebar.more": "加载更早的会话",
++  "sessionSidebar.untitled": "未命名会话",
++  "sessionSidebar.state.input": "等待输入",
++  "sessionSidebar.state.working": "运行中",
++  "sessionSidebar.state.review": "待查看",
++  "sessionSidebar.state.idle": "空闲",
++  "sessionSidebar.time.today": "今天",
++  "sessionSidebar.time.yesterday": "昨天",
++  "sessionSidebar.time.week": "过去 7 天",
++  "sessionSidebar.time.month": "过去 30 天",
++  "sessionSidebar.time.older": "更早",
++  "sessionSidebar.action.stop": "停止运行",
++  "sessionSidebar.action.pin": "置顶会话",
++  "sessionSidebar.action.unpin": "取消置顶",
++  "sessionSidebar.action.rename": "重命名会话",
++  "sessionSidebar.action.archive": "归档会话",
++  "sessionSidebar.action.unarchive": "取消归档",
++  "sessionSidebar.action.delete": "删除会话",
++  "sessionSidebar.action.openNewTab": "在新标签页中打开",
++  "sessionSidebar.action.markRead": "标为已读",
++  "sessionSidebar.action.copyId": "复制会话 ID",
++  "sessionSidebar.action.copyDirectory": "复制工作目录",
++  "sessionSidebar.action.more": "更多操作",
++
+   "desktop.menu.app": "OpenCode",
+   "desktop.menu.file": "文件",
+   "desktop.menu.edit": "编辑",
+@@ -932,6 +993,40 @@ export const dict = {
+   "workspace.delete.confirm": "删除“{{name}}”吗？",
+   "workspace.delete.location": "位置",
+   "settings.search.empty.query": "“{{query}}”",
++  "sessionSidebar.action.openSplit": "在分屏中打开",
++  "sessionSidebar.action.openSplitPosition": "打开到指定分屏…",
++  "sessionSidebar.action.openSplitLeft": "在左屏打开",
++  "sessionSidebar.action.openSplitMiddle": "在中屏打开",
++  "sessionSidebar.action.openSplitRight": "在右屏打开",
++  "splitView.switcher.label": "分屏布局",
++  "splitView.layout.single": "单屏视图",
++  "splitView.layout.twoPanes": "双屏视图（左 / 右）",
++  "splitView.layout.threePanes": "三屏视图（左 / 中 / 右）",
++  "splitView.short.single": "单屏",
++  "splitView.short.twoPanes": "双屏",
++  "splitView.short.threePanes": "三屏",
++  "splitView.position.left": "左屏",
++  "splitView.position.middle": "中屏",
++  "splitView.position.right": "右屏",
++  "splitView.badge.left": "左",
++  "splitView.badge.middle": "中",
++  "splitView.badge.right": "右",
++  "splitView.pane.newSession": "在此分屏新建会话",
++  "splitView.pane.moveLeft": "分屏左移",
++  "splitView.pane.moveRight": "分屏右移",
++  "splitView.pane.maximize": "最大化此分屏",
++  "splitView.pane.close": "关闭此分屏",
++  "splitView.drop.left": "放入左屏",
++  "splitView.drop.middle": "放入中屏",
++  "splitView.drop.right": "放入右屏",
++  "splitView.command.single": "切换为单屏视图",
++  "splitView.command.twoPanes": "切换双屏分屏（左/右）",
++  "splitView.command.threePanes": "切换三屏分屏（左/中/右）",
++  "splitView.command.splitRight": "向右新增分屏",
++  "splitView.command.closePane": "关闭当前焦点分屏",
++  "splitView.command.focusPrev": "聚焦左侧分屏",
++  "splitView.command.focusNext": "聚焦右侧分屏",
++  "splitView.command.equalize": "均分分屏宽度",
+ } satisfies Partial<Record<Keys, string>>
+ 
+ export default dict
+diff --git a/packages/app/src/runtime/i18n/zht.ts b/packages/app/src/runtime/i18n/zht.ts
+index 82ab93c..16f79d0 100644
+--- a/packages/app/src/runtime/i18n/zht.ts
++++ b/packages/app/src/runtime/i18n/zht.ts
+@@ -3,6 +3,67 @@ import en from "./en"
+ type Keys = keyof typeof en
+ 
+ export const dict = {
++  "sessionSidebar.title": "會話",
++  "sessionSidebar.toggle": "切換會話側邊欄",
++  "sessionSidebar.restore": "恢復分頁列",
++  "sessionSidebar.search": "搜尋會話…",
++  "sessionSidebar.groupBy": "分組方式",
++  "sessionSidebar.group.state": "按狀態",
++  "sessionSidebar.group.project": "按專案",
++  "sessionSidebar.group.time": "按時間",
++  "sessionSidebar.group.none": "不分組",
++  "sessionSidebar.status": "會話可見性",
++  "sessionSidebar.active": "活躍",
++  "sessionSidebar.archived": "已封存",
++  "sessionSidebar.archivedOnly": "僅看已封存",
++  "sessionSidebar.project": "按專案篩選",
++  "sessionSidebar.allProjects": "全部專案",
++  "sessionSidebar.period": "按時間篩選",
++  "sessionSidebar.allTime": "全部時間",
++  "sessionSidebar.day": "最近 24 小時",
++  "sessionSidebar.week": "最近 7 天",
++  "sessionSidebar.month": "最近 30 天",
++  "sessionSidebar.sort": "排序方式",
++  "sessionSidebar.updated": "最近更新",
++  "sessionSidebar.created": "建立時間",
++  "sessionSidebar.filterMenu": "篩選與檢視選項",
++  "sessionSidebar.filter": "篩選",
++  "sessionSidebar.display": "顯示設定",
++  "sessionSidebar.showPath": "顯示專案路徑副標題",
++  "sessionSidebar.markAllRead": "全部標為已讀",
++  "sessionSidebar.resetFilters": "重設篩選條件",
++  "sessionSidebar.pinned": "已釘選",
++  "sessionSidebar.newInProject": "在 {{project}} 中新增會話",
++  "sessionSidebar.noServers": "暫無可用伺服器",
++  "sessionSidebar.disconnected": "正在等待伺服器連線…",
++  "sessionSidebar.loading": "正在載入會話…",
++  "sessionSidebar.failed": "部分會話資料載入失敗。",
++  "sessionSidebar.retry": "重試",
++  "sessionSidebar.empty": "沒有匹配的會話",
++  "sessionSidebar.more": "載入更早的會話",
++  "sessionSidebar.untitled": "未命名會話",
++  "sessionSidebar.state.input": "等待輸入",
++  "sessionSidebar.state.working": "執行中",
++  "sessionSidebar.state.review": "待檢視",
++  "sessionSidebar.state.idle": "閒置",
++  "sessionSidebar.time.today": "今天",
++  "sessionSidebar.time.yesterday": "昨天",
++  "sessionSidebar.time.week": "過去 7 天",
++  "sessionSidebar.time.month": "過去 30 天",
++  "sessionSidebar.time.older": "更早",
++  "sessionSidebar.action.stop": "停止執行",
++  "sessionSidebar.action.pin": "釘選會話",
++  "sessionSidebar.action.unpin": "取消釘選",
++  "sessionSidebar.action.rename": "重新命名會話",
++  "sessionSidebar.action.archive": "封存會話",
++  "sessionSidebar.action.unarchive": "取消封存",
++  "sessionSidebar.action.delete": "刪除會話",
++  "sessionSidebar.action.openNewTab": "在新分頁中開啟",
++  "sessionSidebar.action.markRead": "標為已讀",
++  "sessionSidebar.action.copyId": "複製會話 ID",
++  "sessionSidebar.action.copyDirectory": "複製工作目錄",
++  "sessionSidebar.action.more": "更多操作",
++
+   "desktop.menu.app": "OpenCode",
+   "desktop.menu.file": "檔案",
+   "desktop.menu.edit": "編輯",
+@@ -927,4 +988,38 @@ export const dict = {
+   "error.chain.mcpFailed": "MCP 伺服器「{{name}}」啟動失敗。注意：OpenCode 尚不支援 MCP 驗證。",
+   "session.delete.confirm": "要刪除工作階段「{{name}}」嗎？",
+   "settings.search.empty.query": "「{{query}}」",
++  "sessionSidebar.action.openSplit": "在分割畫面中開啟",
++  "sessionSidebar.action.openSplitPosition": "開啟至指定分割畫面…",
++  "sessionSidebar.action.openSplitLeft": "在左畫面開啟",
++  "sessionSidebar.action.openSplitMiddle": "在中畫面開啟",
++  "sessionSidebar.action.openSplitRight": "在右畫面開啟",
++  "splitView.switcher.label": "分割畫面配置",
++  "splitView.layout.single": "單一畫面",
++  "splitView.layout.twoPanes": "雙畫面（左 / 右）",
++  "splitView.layout.threePanes": "三畫面（左 / 中 / 右）",
++  "splitView.short.single": "單屏",
++  "splitView.short.twoPanes": "雙屏",
++  "splitView.short.threePanes": "三屏",
++  "splitView.position.left": "左屏",
++  "splitView.position.middle": "中屏",
++  "splitView.position.right": "右屏",
++  "splitView.badge.left": "左",
++  "splitView.badge.middle": "中",
++  "splitView.badge.right": "右",
++  "splitView.pane.newSession": "在此分割畫面新增工作階段",
++  "splitView.pane.moveLeft": "分割畫面左移",
++  "splitView.pane.moveRight": "分割畫面右移",
++  "splitView.pane.maximize": "最大化此分割畫面",
++  "splitView.pane.close": "關閉此分割畫面",
++  "splitView.drop.left": "放入左屏",
++  "splitView.drop.middle": "放入中屏",
++  "splitView.drop.right": "放入右屏",
++  "splitView.command.single": "切換為單一畫面",
++  "splitView.command.twoPanes": "切換雙畫面分割（左/右）",
++  "splitView.command.threePanes": "切換三畫面分割（左/中/右）",
++  "splitView.command.splitRight": "向右新增分割畫面",
++  "splitView.command.closePane": "關閉目前焦點分割畫面",
++  "splitView.command.focusPrev": "聚焦左側分割畫面",
++  "splitView.command.focusNext": "聚焦右側分割畫面",
++  "splitView.command.equalize": "均分分割畫面寬度",
+ } satisfies Partial<Record<Keys, string>>
+diff --git a/packages/app/src/session/composer/region.tsx b/packages/app/src/session/composer/region.tsx
+index 1315a86..9126e70 100644
+--- a/packages/app/src/session/composer/region.tsx
++++ b/packages/app/src/session/composer/region.tsx
+@@ -19,6 +19,7 @@ import { useLocal } from "@/providers/models/selection"
+ import { usePlatform } from "@/runtime/platform/platform"
+ import { useWorkspaceLocation } from "@/workspaces/location"
+ import { requireServerKey, sessionHref } from "@/shell/routes/session"
++import { useSplitPane } from "@/shell/split-view/context"
+ import { useComposerCommands } from "@/composer/commands"
+ import { useSessionCommands } from "../commands/use-session-commands"
+ import type { SessionModel } from "../model"
+@@ -51,6 +52,7 @@ export function createActiveSessionRegion(input: {
+   const navigate = useNavigate()
+   const platform = usePlatform()
+   const prompt = useComposerState()
++  const splitPane = useSplitPane()
+   const state = createSessionRequestModel()
+   const controls = createComposerControls()
+   let promptRef: HTMLDivElement | undefined
+@@ -135,6 +137,7 @@ export function createActiveSessionRegion(input: {
+ 
+   const handleKeyDown = (event: KeyboardEvent) => {
+     if (event.defaultPrevented) return
++    if (splitPane && !splitPane.focused()) return
+     const path = event.composedPath()
+     const target = path.find((item): item is HTMLElement => item instanceof HTMLElement)
+     const active = activeElement()
+diff --git a/packages/app/src/session/screen-layout.ts b/packages/app/src/session/screen-layout.ts
+index a721b16..0ff55ed 100644
+--- a/packages/app/src/session/screen-layout.ts
++++ b/packages/app/src/session/screen-layout.ts
+@@ -2,6 +2,7 @@ import { createMemo, type Accessor } from "solid-js"
+ import { createStore } from "solid-js/store"
+ import { createResizeObserver } from "@solid-primitives/resize-observer"
+ import { useLayout } from "@/shell/state/layout"
++import { useSplitPane } from "@/shell/split-view/context"
+ import { useSettings } from "@/settings/model"
+ import { createSizing } from "./helpers"
+ import type { SessionModel } from "./model"
+@@ -13,6 +14,7 @@ export function createSessionScreenLayout(
+   input: { wide: Accessor<boolean>; sidebar: Accessor<boolean> },
+ ) {
+   const layout = useLayout()
++  const splitPane = useSplitPane()
+   const settings = useSettings()
+   const size = createSizing()
+   const view = session.layout.view
+@@ -22,12 +24,6 @@ export function createSessionScreenLayout(
+   const dockBottom = createMemo(() => session.isDesktop() && settings.general.terminalPlacement() === "bottom")
+   const dockSideOpen = createMemo(() => dockOpen() && dockSide())
+ 
+-  const fileTreeOpen = createMemo(
+-    () => session.isDesktop() && input.sidebar() && settings.visibility.fileTree() && layout.fileTree.opened(),
+-  )
+-
+-  const resizable = createMemo(() => tabsOpen() || dockSideOpen())
+-  const besideOpen = createMemo(() => resizable() || fileTreeOpen())
+   const [rowSize, setRowSize] = createStore<{ width?: number; height?: number }>({})
+   let row: HTMLDivElement | undefined
+   createResizeObserver(
+@@ -43,6 +39,18 @@ export function createSessionScreenLayout(
+     return width - 8
+   })
+ 
++  const fileTreeOpen = createMemo(
++    () =>
++      session.isDesktop() &&
++      input.sidebar() &&
++      settings.visibility.fileTree() &&
++      layout.fileTree.opened() &&
++      (!splitPane || splitPane.count() === 1 || (available() ?? 0) >= 840),
++  )
++
++  const resizable = createMemo(() => tabsOpen() || dockSideOpen())
++  const besideOpen = createMemo(() => resizable() || fileTreeOpen())
++
+   const splitSide = createMemo(() => tabsOpen() && input.wide())
+ 
+   const resizedWidth = createMemo(() =>
+diff --git a/packages/app/src/session/screen.tsx b/packages/app/src/session/screen.tsx
+index a2cd389..6f2aa9a 100644
+--- a/packages/app/src/session/screen.tsx
++++ b/packages/app/src/session/screen.tsx
+@@ -25,6 +25,7 @@ import { createPanelSidebar, createRegion, DockRegion, MobilePanel } from "@/run
+ import { createMobileViews, MobileViewTabs } from "@/runtime/extension/mobile"
+ import { useExtensionAttachment } from "@/runtime/extension/host-apis"
+ import { createMountedSession } from "@/runtime/extension/mounted-session"
++import { useSplitPane } from "@/shell/split-view/context"
+ import { useUsageExceededDialogs } from "./usage-exceeded-dialogs"
+ import { SessionErrorFallback } from "./route-error"
+ import { createSessionScreenLayout } from "./screen-layout"
+@@ -65,6 +66,7 @@ function SessionScreenContent(props: {
+   const session = props.session
+   const host = useExtensionHost()
+   const attachment = useExtensionAttachment()
++  const splitPane = useSplitPane()
+   const settings = useSettings()
+   const isDesktop = session.isDesktop
+   const bottomMobileTabs = () => settings.general.mobileTitlebarPosition() === "bottom"
+@@ -77,7 +79,10 @@ function SessionScreenContent(props: {
+     tabs: session.layout.tabs,
+   })
+ 
+-  onCleanup(attachment.region(region))
++  createEffect(() => {
++    if (splitPane && !splitPane.focused()) return
++    onCleanup(attachment.region(region))
++  })
+   const mobile = createMobileViews()
+ 
+   const screen = createSessionScreenLayout(session, {
+diff --git a/packages/app/src/settings/model.test.ts b/packages/app/src/settings/model.test.ts
+index b83db39..d7f27ab 100644
+--- a/packages/app/src/settings/model.test.ts
++++ b/packages/app/src/settings/model.test.ts
+@@ -101,7 +101,7 @@ describe("settings schema", () => {
+       appearance: {
+         fontSize: 14,
+         mono: "",
+-        sans: "",
++        sans: "Noto Serif SC",
+         terminal: "",
+         tabLayout: "horizontal",
+       },
+@@ -146,7 +146,7 @@ describe("settings schema", () => {
+     expect(settings.appearance).toEqual({
+       fontSize: 14,
+       mono: "Custom Mono",
+-      sans: "",
++      sans: "Noto Serif SC",
+       terminal: "",
+       tabLayout: "vertical",
+     })
+@@ -186,16 +186,16 @@ describe("settings schema", () => {
+   })
+ })
+ 
+-test("font defaults are Inter and IBM Plex Mono", () => {
+-  expect(sansDefault).toBe("Inter")
++test("preserves the installed Noto Serif SC and IBM Plex Mono defaults", () => {
++  expect(sansDefault).toBe("Noto Serif SC")
+   expect(monoDefault).toBe("IBM Plex Mono")
+ })
+ 
+ test.each([
+-  { name: "sans", family: sansFontFamily, font: undefined, prefix: '"Inter", ' },
+-  { name: "sans", family: sansFontFamily, font: "", prefix: '"Inter", ' },
+-  { name: "sans", family: sansFontFamily, font: "   ", prefix: '"Inter", ' },
+-  { name: "sans", family: sansFontFamily, font: "Custom Sans", prefix: '"Custom Sans", "Inter", ' },
++  { name: "sans", family: sansFontFamily, font: undefined, prefix: '"Noto Serif SC", "Inter", ' },
++  { name: "sans", family: sansFontFamily, font: "", prefix: '"Noto Serif SC", "Inter", ' },
++  { name: "sans", family: sansFontFamily, font: "   ", prefix: '"Noto Serif SC", "Inter", ' },
++  { name: "sans", family: sansFontFamily, font: "Custom Sans", prefix: '"Custom Sans", "Noto Serif SC", "Inter", ' },
+   { name: "mono", family: monoFontFamily, font: undefined, prefix: '"IBM Plex Mono", ' },
+   { name: "mono", family: monoFontFamily, font: "", prefix: '"IBM Plex Mono", ' },
+   { name: "mono", family: monoFontFamily, font: "   ", prefix: '"IBM Plex Mono", ' },
+diff --git a/packages/app/src/settings/model.tsx b/packages/app/src/settings/model.tsx
+index 8efa301..50a45b9 100644
+--- a/packages/app/src/settings/model.tsx
++++ b/packages/app/src/settings/model.tsx
+@@ -30,14 +30,15 @@ export function projectSettingsKey(scope: ServerScope, projectID: string | undef
+ 
+ export const monoDefault = "IBM Plex Mono"
+ 
+-export const sansDefault = "Inter"
++export const sansDefault = "Noto Serif SC"
+ 
+ export const terminalDefault = "JetBrainsMono Nerd Font Mono"
+ 
+ const monoFallback =
+   '"IBM Plex Mono", ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace'
+ 
+-const sansFallback = '"Inter", ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif'
++const sansFallback =
++  '"Noto Serif SC", "Inter", ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif'
+ 
+ const terminalFallback =
+   '"JetBrainsMono Nerd Font Mono", ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace'
+@@ -284,7 +285,7 @@ export const defaultSettings: Settings = {
+     terminalPlacement: "side",
+     followUpBehavior: "steer",
+   },
+-  appearance: { fontSize: 14, mono: "", sans: "", terminal: "", tabLayout: "horizontal" },
++  appearance: { fontSize: 14, mono: "", sans: "Noto Serif SC", terminal: "", tabLayout: "horizontal" },
+   keybinds: {},
+   permissions: { autoApprove: false, autoApproveProjects: {} },
+   workspaces: { defaultDestination: "last-used", lastUsed: {} },
+diff --git a/packages/app/src/shell/commands/command.tsx b/packages/app/src/shell/commands/command.tsx
+index d93693b..f961465 100644
+--- a/packages/app/src/shell/commands/command.tsx
++++ b/packages/app/src/shell/commands/command.tsx
+@@ -1,6 +1,17 @@
+ import { createSimpleContext } from "@opencode/ui/context"
+ import { useDialog } from "@opencode/ui/context/dialog"
+-import { type Accessor, batch, createEffect, createMemo, onCleanup, onMount, untrack } from "solid-js"
++import {
++  type Accessor,
++  type ParentProps,
++  batch,
++  createContext,
++  createEffect,
++  createMemo,
++  onCleanup,
++  onMount,
++  untrack,
++  useContext,
++} from "solid-js"
+ import { createStore, produce, reconcile } from "solid-js/store"
+ import { Schema } from "effect"
+ import { Persistence } from "@/runtime/persistence/schema"
+@@ -148,6 +159,12 @@ export type CommandRegistration = {
+   options: Accessor<CommandOption[]>
+ }
+ 
++const CommandFocusScopeContext = createContext<Accessor<boolean>>()
++
++export function CommandFocusScopeProvider(props: ParentProps<{ active: Accessor<boolean> }>) {
++  return <CommandFocusScopeContext.Provider value={props.active}>{props.children}</CommandFocusScopeContext.Provider>
++}
++
+ export function addCommandRegistration(registrations: CommandRegistration[], entry: CommandRegistration) {
+   return [entry, ...registrations]
+ }
+@@ -158,6 +175,8 @@ export function activeCommandRegistrations(registrations: CommandRegistration[])
+   return registrations.filter((entry) => {
+     if (entry.key === undefined) return true
+ 
++    if (entry.options().length === 0) return false
++
+     if (keys.has(entry.key)) return false
+     keys.add(entry.key)
+ 
+@@ -521,7 +540,8 @@ export const { use: useCommand, provider: CommandProvider } = createSimpleContex
+       const next = typeof key === "function" ? key : cb
+ 
+       if (!next) return
+-      const options = createMemo(next)
++      const focusScope = useContext(CommandFocusScopeContext)
++      const options = createMemo(() => (focusScope && !focusScope() ? [] : next()))
+ 
+       const entry: CommandRegistration = {
+         key: id,
+diff --git a/packages/app/src/shell/shell.tsx b/packages/app/src/shell/shell.tsx
+index 25bc495..cbba56d 100644
+--- a/packages/app/src/shell/shell.tsx
++++ b/packages/app/src/shell/shell.tsx
+@@ -11,85 +11,118 @@ import { useSettingsSurface } from "@/settings/surface"
+ import { useSettings } from "@/settings/model"
+ import { ExtensionServerCover } from "@/runtime/extension/server-shell"
+ import { ExtensionSlot } from "@/runtime/extension/render"
++import { useCommand } from "@/shell/commands/command"
++import { useLanguage } from "@/runtime/i18n/language"
++import { createSidebarPreferences } from "@/shell/session-sidebar/preferences"
++import { SessionSidebar } from "@/shell/session-sidebar/sidebar"
++import { SplitViewProvider } from "@/shell/split-view/context"
++import { SplitWorkbench } from "@/shell/split-view/workbench"
+ 
+ export default function Layout(props: ParentProps) {
+   const platform = usePlatform()
+   const settings = useSettingsSurface()
+   const preferences = useSettings()
+   const mobile = createMediaQuery("(max-width: 767px)")
++  const command = useCommand()
++  const language = useLanguage()
++  const [sidebar, setSidebar, , sidebarReady] = createSidebarPreferences()
++  const showSidebar = () => sidebarReady() && sidebar.enabled && !mobile()
++
++  command.register("session-sidebar", () => [
++    {
++      id: "session-sidebar.toggle",
++      title: language.t("sessionSidebar.toggle"),
++      category: language.t("command.category.view"),
++      keybind: "mod+shift+b",
++      onSelect: async () => {
++        await sidebarReady.promise
++        setSidebar("enabled", (enabled) => !enabled)
++      },
++    },
++  ])
+ 
+   const [state, setState] = createStore<{ tabsWidth: number; tabsMount: HTMLElement | undefined }>({
+     tabsWidth: 260,
+     tabsMount: undefined,
+   })
+ 
+-  const verticalTabs = () => preferences.appearance.tabLayout() === "vertical" && !mobile()
++  const verticalTabs = () => preferences.appearance.tabLayout() === "vertical" && !mobile() && !showSidebar()
+   const bottomTitlebar = () => mobile() && preferences.general.mobileTitlebarPosition() === "bottom"
+ 
+   return (
+     <TitlebarRightProvider>
+-      <div
+-        class="relative bg-v2-background-bg-deep flex-1 min-h-0 min-w-0 flex flex-col select-none [&_input]:select-text [&_textarea]:select-text [&_[contenteditable]]:select-text"
+-        style={{
+-          // Mobile panels only need clearance for their outer border.
+-          "--shell-inline-inset": mobile() ? "1px" : "8px",
+-          // A bottom mobile titlebar leaves main's top edge to the safe area. Native Windows chrome supplies the gap;
+-          // retain outer-outline clearance.
+-          "--shell-top-inset": bottomTitlebar()
+-            ? "0px"
+-            : platform.platform === "desktop" && platform.os === "windows"
+-              ? "1px"
+-              : "8px",
+-          "--shell-bottom-inset": bottomTitlebar()
+-            ? "8px"
+-            : "max(0px, calc(8px - var(--safe-area-inset-bottom, env(safe-area-inset-bottom, 0px))))",
+-        }}
+-      >
+-        <Titlebar verticalTabs={verticalTabs() ? { mount: state.tabsMount } : undefined} />
+-        <div class="flex flex-1 min-h-0 min-w-0 flex-row">
+-          <Show when={verticalTabs()}>
+-            <aside
+-              ref={(element) => setState("tabsMount", element)}
+-              data-slot="vertical-tabs-sidebar"
+-              class="relative flex h-full min-h-0 shrink-0 flex-col bg-v2-background-bg-deep pe-0.5 ps-2.5 pb-[var(--shell-bottom-inset,8px)] pt-[var(--shell-top-inset,8px)]"
++      <SplitViewProvider>
++        <div
++          class="relative bg-v2-background-bg-deep flex-1 min-h-0 min-w-0 flex flex-col select-none [&_input]:select-text [&_textarea]:select-text [&_[contenteditable]]:select-text"
++          style={{
++            // Mobile panels only need clearance for their outer border.
++            "--shell-inline-inset": mobile() ? "1px" : "8px",
++            // A bottom mobile titlebar leaves main's top edge to the safe area. Native Windows chrome supplies the gap;
++            // retain outer-outline clearance.
++            "--shell-top-inset": bottomTitlebar()
++              ? "0px"
++              : platform.platform === "desktop" && platform.os === "windows"
++                ? "1px"
++                : "8px",
++            "--shell-bottom-inset": bottomTitlebar()
++              ? "8px"
++              : "max(0px, calc(8px - var(--safe-area-inset-bottom, env(safe-area-inset-bottom, 0px))))",
++          }}
++        >
++          <Titlebar
++            hideSessionTabs={showSidebar()}
++            verticalTabs={verticalTabs() ? { mount: state.tabsMount } : undefined}
++          />
++          <div class="flex flex-1 min-h-0 min-w-0 flex-row">
++            <Show when={showSidebar()}>
++              <SessionSidebar filter={sidebar} setFilter={setSidebar} close={() => setSidebar("enabled", false)} />
++            </Show>
++            <Show when={verticalTabs()}>
++              <aside
++                ref={(element) => setState("tabsMount", element)}
++                data-slot="vertical-tabs-sidebar"
++                class="relative flex h-full min-h-0 shrink-0 flex-col bg-v2-background-bg-deep pe-0.5 ps-2.5 pb-[var(--shell-bottom-inset,8px)] pt-[var(--shell-top-inset,8px)]"
++                style={{
++                  width: `${state.tabsWidth}px`,
++                  "padding-bottom": "max(10px, var(--safe-area-inset-bottom, env(safe-area-inset-bottom, 0px)))",
++                }}
++              >
++                <ResizeHandle
++                  class="-end-2"
++                  direction="horizontal"
++                  size={state.tabsWidth}
++                  min={140}
++                  max={520}
++                  onResize={(width) => setState("tabsWidth", width)}
++                />
++              </aside>
++            </Show>
++            {/* Size containment collapses percentage-height descendants in WebKit. */}
++            <main
++              class="flex-1 min-h-0 min-w-0 overflow-x-hidden flex flex-col items-start contain-content"
+               style={{
+-                width: `${state.tabsWidth}px`,
+-                "padding-bottom": "max(10px, var(--safe-area-inset-bottom, env(safe-area-inset-bottom, 0px)))",
++                "padding-top": bottomTitlebar() ? "env(safe-area-inset-top, 0px)" : "0px",
++                "padding-bottom":
++                  bottomTitlebar() || settings.active()
++                    ? "0px"
++                    : "var(--safe-area-inset-bottom, env(safe-area-inset-bottom, 0px))",
++                "--settings-bottom-inset": bottomTitlebar()
++                  ? "40px"
++                  : "var(--safe-area-inset-bottom, env(safe-area-inset-bottom, 0px))",
+               }}
+             >
+-              <ResizeHandle
+-                class="-end-2"
+-                direction="horizontal"
+-                size={state.tabsWidth}
+-                min={140}
+-                max={520}
+-                onResize={(width) => setState("tabsWidth", width)}
+-              />
+-            </aside>
+-          </Show>
+-          {/* Size containment collapses percentage-height descendants in WebKit. */}
+-          <main
+-            class="flex-1 min-h-0 min-w-0 overflow-x-hidden flex flex-col items-start contain-content"
+-            style={{
+-              "padding-top": bottomTitlebar() ? "env(safe-area-inset-top, 0px)" : "0px",
+-              "padding-bottom":
+-                bottomTitlebar() || settings.active()
+-                  ? "0px"
+-                  : "var(--safe-area-inset-bottom, env(safe-area-inset-bottom, 0px))",
+-              "--settings-bottom-inset": bottomTitlebar()
+-                ? "40px"
+-                : "var(--safe-area-inset-bottom, env(safe-area-inset-bottom, 0px))",
+-            }}
+-          >
+-            <ExtensionServerCover>
+-              <Suspense>{props.children}</Suspense>
+-            </ExtensionServerCover>
+-          </main>
++              <ExtensionServerCover>
++                <SplitWorkbench>
++                  <Suspense>{props.children}</Suspense>
++                </SplitWorkbench>
++              </ExtensionServerCover>
++            </main>
++          </div>
++          <ExtensionSlot at="window.bottom" input={{}} />
++          <ToastRegion />
++          <UploadToastHost />
+         </div>
+-        <ExtensionSlot at="window.bottom" input={{}} />
+-        <ToastRegion />
+-        <UploadToastHost />
+-      </div>
++      </SplitViewProvider>
+     </TitlebarRightProvider>
+   )
+ }
+diff --git a/packages/app/src/shell/tabs/tabs.tsx b/packages/app/src/shell/tabs/tabs.tsx
+index 62a073a..7080791 100644
+--- a/packages/app/src/shell/tabs/tabs.tsx
++++ b/packages/app/src/shell/tabs/tabs.tsx
+@@ -84,6 +84,7 @@ export const { use: useTabs, provider: TabsProvider } = createSimpleContext({
+     const [regions, setRegions, , regionsReady] = persisted(Persist.window("tabs.panes"), TabStorage.Regions, {})
+     const [closed, setClosed, , closedReady] = persisted(Persist.window("tabs.closed"), TabStorage.Closed, [])
+     const [pending, setPending] = createStore<Record<string, PendingSession | undefined>>({})
++    const [promoted, setPromoted] = createStore<Record<string, Omit<SessionTab, "type"> | undefined>>({})
+ 
+     const navigate = useNavigate()
+     const location = useLocation()
+@@ -264,6 +265,35 @@ export const { use: useTabs, provider: TabsProvider } = createSimpleContext({
+ 
+         return tab
+       },
++      createDraftTab(
++        draft: Omit<DraftTab, "type" | "draftID"> & { draftID?: string },
++        prompt?: string,
++        model?: PromptModel,
++      ) {
++        const draftID = draft.draftID ?? uuid()
++        const existing = store.find((item): item is DraftTab => item.type === "draft" && item.draftID === draftID)
++        if (existing) return existing
++        const tab: DraftTab = {
++          type: "draft",
++          draftID,
++          server: draft.server,
++          directory: draft.directory,
++          worktree: draft.worktree,
++          branch: draft.branch,
++        }
++        memory.ensure(tabKey(tab), "prompt", () => createDraftComposerState(draftID, { prompt, model }))
++        setStore(
++          produce((tabs) => {
++            if (!tabs.some((item) => item.type === "draft" && item.draftID === draftID)) {
++              tabs.push(tab)
++            }
++          }),
++        )
++        return tab
++      },
++      promotedDraft(draftID: string) {
++        return promoted[draftID]
++      },
+       async newDraft(draft: Omit<DraftTab, "type" | "draftID">, prompt?: string, model?: PromptModel) {
+         const draftID = uuid()
+         const tab = { type: "draft" as const, draftID, ...draft }
+@@ -300,6 +330,7 @@ export const { use: useTabs, provider: TabsProvider } = createSimpleContext({
+         // after its backing draft tab has been removed from the store.
+         const active = location.pathname === "/new-session" && location.query.draftId === draftID
+         const next = { type: "session" as const, ...session }
++        setPromoted(draftID, session)
+         void startTransition(() => {
+           setStore(
+             produce((tabs) => {
+@@ -332,6 +363,7 @@ export const { use: useTabs, provider: TabsProvider } = createSimpleContext({
+ 
+         const ready = startTransition(() => {
+           setPending(key, { draft, ...preview, composer })
++          setPromoted(draftID, session)
+           const index = store.findIndex((tab) => tab.type === "draft" && tab.draftID === draftID)
+ 
+           if (index === -1) return
+@@ -396,6 +428,7 @@ export const { use: useTabs, provider: TabsProvider } = createSimpleContext({
+               }
+ 
+               setPending(key, undefined)
++              setPromoted(draftID, undefined)
+             })
+             updateClosed((stack) => removeClosedTabs(stack, session.server, [session.sessionId]))
+             memory.remove(key)
+diff --git a/packages/app/src/shell/titlebar/right-slot.tsx b/packages/app/src/shell/titlebar/right-slot.tsx
+index 05cf680..c6fac29 100644
+--- a/packages/app/src/shell/titlebar/right-slot.tsx
++++ b/packages/app/src/shell/titlebar/right-slot.tsx
+@@ -1,6 +1,7 @@
+-import { createContext, onCleanup, onMount, Show, useContext, type ParentProps } from "solid-js"
++import { createContext, createEffect, onCleanup, Show, useContext, type ParentProps } from "solid-js"
+ import { createStore } from "solid-js/store"
+ import { Portal } from "solid-js/web"
++import { useSplitPane } from "@/shell/split-view/context"
+ 
+ type Registration = {
+   active: () => boolean
+@@ -54,8 +55,10 @@ export function TitlebarRightMount(props: { vertical?: boolean }) {
+ 
+ export function TitlebarRight(props: ParentProps) {
+   const slot = useTitlebarRightSlot()
++  const splitPane = useSplitPane()
+   const registration = slot.createRegistration()
+-  onMount(() => {
++  createEffect(() => {
++    if (splitPane && !splitPane.focused()) return
+     registration.register()
+     onCleanup(registration.unregister)
+   })
+diff --git a/packages/app/src/shell/titlebar/tab-nav.tsx b/packages/app/src/shell/titlebar/tab-nav.tsx
+index 77088bf..200f4a6 100644
+--- a/packages/app/src/shell/titlebar/tab-nav.tsx
++++ b/packages/app/src/shell/titlebar/tab-nav.tsx
+@@ -16,6 +16,7 @@ import { SessionProgressIndicatorV2 } from "@opencode/session-ui/v2/session-prog
+ import type { SessionInfo } from "@opencode/client/promise"
+ import { sessionTabTitle } from "./tab-title"
+ import { TabPreviewPopover } from "./tab-popover"
++import { useOptionalSplitView } from "@/shell/split-view/context"
+ import "./tab-nav.css"
+ 
+ // MouseEvent.button uses 1 for the middle/wheel button.
+@@ -41,6 +42,7 @@ export function TabNavItem(props: {
+   orientation?: "horizontal" | "vertical"
+ }) {
+   const language = useLanguage()
++  const split = useOptionalSplitView()
+   const [menu, setMenu] = createStore({ open: false, rename: false })
+   const [editing, setEditing] = createSignal(false)
+   const [titleOverflowing, setTitleOverflowing] = createSignal(false)
+@@ -412,6 +414,67 @@ export function TabNavItem(props: {
+             openRename()
+           }}
+         >
++          <Show when={split && props.session}>
++            <Menu.Item
++              onSelect={() => {
++                const s = props.session
++                if (!s || !split) return
++                split.openSessionInSplit({
++                  server: props.server,
++                  sessionId: s.id,
++                  directory: s.location.directory,
++                })
++              }}
++            >
++              {language.t("sessionSidebar.action.openSplit")}
++            </Menu.Item>
++            <Menu.Sub>
++              <Menu.SubTrigger>{language.t("sessionSidebar.action.openSplitPosition")}</Menu.SubTrigger>
++              <Menu.Portal>
++                <Menu.SubContent class="min-w-[150px] [font-family:var(--v2-font-family-sans)]">
++                  <Menu.Item
++                    onSelect={() => {
++                      const s = props.session
++                      if (!s || !split) return
++                      split.openSessionInSplit(
++                        { server: props.server, sessionId: s.id, directory: s.location.directory },
++                        "left",
++                      )
++                    }}
++                  >
++                    {language.t("sessionSidebar.action.openSplitLeft")}
++                  </Menu.Item>
++                  <Show when={(split?.count() ?? 1) >= 2}>
++                    <Menu.Item
++                      onSelect={() => {
++                        const s = props.session
++                        if (!s || !split) return
++                        split.openSessionInSplit(
++                          { server: props.server, sessionId: s.id, directory: s.location.directory },
++                          "middle",
++                        )
++                      }}
++                    >
++                      {language.t("sessionSidebar.action.openSplitMiddle")}
++                    </Menu.Item>
++                  </Show>
++                  <Menu.Item
++                    onSelect={() => {
++                      const s = props.session
++                      if (!s || !split) return
++                      split.openSessionInSplit(
++                        { server: props.server, sessionId: s.id, directory: s.location.directory },
++                        "right",
++                      )
++                    }}
++                  >
++                    {language.t("sessionSidebar.action.openSplitRight")}
++                  </Menu.Item>
++                </Menu.SubContent>
++              </Menu.Portal>
++            </Menu.Sub>
++            <Menu.Separator />
++          </Show>
+           <Menu.Item disabled={!props.session || rename.isPending} onSelect={() => setMenu("rename", true)}>
+             {language.t("common.rename")}
+           </Menu.Item>
+diff --git a/packages/app/src/shell/titlebar/titlebar.tsx b/packages/app/src/shell/titlebar/titlebar.tsx
+index f3780f5..dc31f6b 100644
+--- a/packages/app/src/shell/titlebar/titlebar.tsx
++++ b/packages/app/src/shell/titlebar/titlebar.tsx
+@@ -34,6 +34,7 @@ import { rootSession } from "@/shell/routes/session"
+ import { TitlebarItem } from "@opencode/gui-extensions/sdk"
+ import { useExtensionHost } from "@/runtime/extension/host"
+ import { TitlebarItems, useTitlebarItems } from "@/runtime/extension/titlebar-items"
++import { SplitLayoutSwitcher } from "@/shell/split-view/workbench"
+ import devIcon from "../../../../desktop/icons/dev/64x64.png"
+ import betaIcon from "../../../../desktop/icons/beta/64x64.png"
+ 
+@@ -54,7 +55,7 @@ const macTrafficLightsTopClearance = 28
+ // titlebar row stays 16px clear of it, as ChatGPT's phone header does. Without one, 8px matches the content gap below.
+ const mobileTopClearance = "max(8px, min(16px, env(safe-area-inset-top, 0px) * 1000))"
+ 
+-export function Titlebar(props: { verticalTabs?: { mount?: HTMLElement } }) {
++export function Titlebar(props: { hideSessionTabs?: boolean; verticalTabs?: { mount?: HTMLElement } }) {
+   const platform = usePlatform()
+   const command = useCommand()
+   const language = useLanguage()
+@@ -682,20 +683,22 @@ export function Titlebar(props: { verticalTabs?: { mount?: HTMLElement } }) {
+                     when={props.verticalTabs}
+                     fallback={
+                       <>
+-                        <TitlebarTabStrip
+-                          tabs={tabsStore}
+-                          currentTab={currentTab()}
+-                          onNavigate={(tab, el) => {
+-                            tabs.select(tab)
+-                            el?.scrollIntoView({ behavior: "instant" })
+-                          }}
+-                          onClose={(tab) => {
+-                            const index = tabsStore.findIndex((item) => tabKey(item) === tabKey(tab))
+-
+-                            if (index !== -1) tabsStoreActions.closeTab(index)
+-                          }}
+-                          onReorder={(keys) => tabsStoreActions.reorder(keys)}
+-                        />
++                        <Show when={!props.hideSessionTabs}>
++                          <TitlebarTabStrip
++                            tabs={tabsStore}
++                            currentTab={currentTab()}
++                            onNavigate={(tab, el) => {
++                              tabs.select(tab)
++                              el?.scrollIntoView({ behavior: "instant" })
++                            }}
++                            onClose={(tab) => {
++                              const index = tabsStore.findIndex((item) => tabKey(item) === tabKey(tab))
++
++                              if (index !== -1) tabsStoreActions.closeTab(index)
++                            }}
++                            onReorder={(keys) => tabsStoreActions.reorder(keys)}
++                          />
++                        </Show>
+                         <RecentlyClosedTabsMenu
+                           onNewTab={openNewTab}
+                           tooltip={
+@@ -764,7 +767,10 @@ export function Titlebar(props: { verticalTabs?: { mount?: HTMLElement } }) {
+                   <div class="flex-1" />
+                 </Show>
+                 <Show when={!props.verticalTabs}>
+-                  <div class="relative z-20 flex shrink-0 items-center justify-end gap-0 overflow-visible">
++                  <div class="relative z-20 flex shrink-0 items-center justify-end gap-1.5 overflow-visible">
++                    <Show when={!mobile()}>
++                      <SplitLayoutSwitcher showSplitAction />
++                    </Show>
+                     <TitlebarItems items={titlebarItems} />
+                     <TitlebarRightMount />
+                   </div>
+diff --git a/packages/ui/src/theme/context.tsx b/packages/ui/src/theme/context.tsx
+index 9a4cc5a..ce5616f 100644
+--- a/packages/ui/src/theme/context.tsx
++++ b/packages/ui/src/theme/context.tsx
+@@ -5,6 +5,7 @@ import { createStore } from "solid-js/store"
+ import { makeEventListener } from "@solid-primitives/event-listener"
+ import { createSimpleContext } from "../context/helper"
+ import oc2ThemeJson from "./themes/oc-2.json"
++import absolutelyThemeJson from "./themes/absolutely.json"
+ import { resolveThemeVariant, themeToCss } from "./resolve"
+ import { resolveThemeVariantV2, themeV2ToCss } from "./v2/resolve"
+ import type { DesktopTheme } from "./types"
+@@ -51,6 +52,7 @@ function knownThemes() {
+ 
+ const names: Record<string, string> = {
+   "oc-2": "OpenCode",
++  absolutely: "Absolutely",
+   amoled: "AMOLED",
+   aura: "Aura",
+   ayu: "Ayu",
+@@ -207,6 +209,7 @@ export const { use: useTheme, provider: ThemeProvider } = createSimpleContext({
+     const [store, setStore] = createStore({
+       themes: {
+         "oc-2": oc2Theme,
++        absolutely: absolutelyThemeJson as DesktopTheme,
+       } as Record<string, DesktopTheme>,
+       themeId,
+       colorScheme,

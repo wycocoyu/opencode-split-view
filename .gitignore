@@ -1,0 +1,8 @@
+__pycache__/
+*.pyc
+.DS_Store
+node_modules/
+tools/current-backup.txt
+tools/patch-manifest.json
+tools/patched-app.asar
+tools/backups/
