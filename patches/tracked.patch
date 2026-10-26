@@ -1,8 +1,8 @@
 diff --git a/packages/app/e2e/regression/tabs.spec.ts b/packages/app/e2e/regression/tabs.spec.ts
-index 9d1c75a..25d71d6 100644
+index 9d1c75a..dd07c81 100644
 --- a/packages/app/e2e/regression/tabs.spec.ts
 +++ b/packages/app/e2e/regression/tabs.spec.ts
-@@ -942,3 +942,72 @@ async function twoServers(
+@@ -942,3 +942,85 @@ async function twoServers(
      tabs: [input.a[0]!.id, { session: input.b[0]!.id, server: REMOTE_SERVER }],
    })
  }
@@ -49,8 +49,21 @@ index 9d1c75a..25d71d6 100644
 +  await expect(page.locator('[data-slot="split-pane"][data-pane-index="1"]')).toContainText(b.title)
 +
 +  // Badges appear on vanilla tabs for Left and Right panes
-+  await expect(tabA.locator('[data-slot="tab-split-badge"]')).toBeVisible()
-+  await expect(tabB.locator('[data-slot="tab-split-badge"]')).toBeVisible()
++  await expect(tabA.locator('[data-slot="tab-split-badge"]')).toHaveAttribute("data-active-group", "true")
++  await expect(tabB.locator('[data-slot="tab-split-badge"]')).toHaveAttribute("data-active-group", "true")
++
++  // Clicking unsplit Tab C switches to a 1-pane view for Tab C while preserving [Tab A | Tab B] in the background
++  await tabC.locator("[data-titlebar-tab-link]").click()
++  await expect(page.locator('[data-slot="split-workbench"]')).toHaveCount(0)
++  await expect(page.getByRole("heading", { name: c.title })).toBeVisible()
++  await expect(tabA.locator('[data-slot="tab-split-badge"]')).toHaveAttribute("data-active-group", "false")
++  await expect(tabB.locator('[data-slot="tab-split-badge"]')).toHaveAttribute("data-active-group", "false")
++
++  // Clicking Tab A restores the [Tab A | Tab B] 2-pane split view intact
++  await tabA.locator("[data-titlebar-tab-link]").click()
++  await expect(page.locator('[data-slot="split-workbench"]')).toHaveAttribute("data-pane-count", "2")
++  await expect(page.locator('[data-slot="split-pane"][data-pane-index="0"]')).toContainText(a.title)
++  await expect(page.locator('[data-slot="split-pane"][data-pane-index="1"]')).toContainText(b.title)
 +
 +  // 2-pane mode: dragging Tab C downward shows Left, Middle, Right drop zones (3 zones)
 +  const tabCBox = await tabC.boundingBox()
@@ -725,7 +738,7 @@ index 05cf680..c6fac29 100644
      onCleanup(registration.unregister)
    })
 diff --git a/packages/app/src/shell/titlebar/tab-nav.tsx b/packages/app/src/shell/titlebar/tab-nav.tsx
-index 77088bf..6c91a39 100644
+index 77088bf..1a5f034 100644
 --- a/packages/app/src/shell/titlebar/tab-nav.tsx
 +++ b/packages/app/src/shell/titlebar/tab-nav.tsx
 @@ -16,6 +16,7 @@ import { SessionProgressIndicatorV2 } from "@opencode/session-ui/v2/session-prog
@@ -744,22 +757,29 @@ index 77088bf..6c91a39 100644
    const [menu, setMenu] = createStore({ open: false, rename: false })
    const [editing, setEditing] = createSignal(false)
    const [titleOverflowing, setTitleOverflowing] = createSignal(false)
-@@ -60,6 +62,78 @@ export function TabNavItem(props: {
+@@ -60,6 +62,87 @@ export function TabNavItem(props: {
  
    const unread = () => !!props.session && !props.active && props.unread
  
-+  const splitBadgeLabel = createMemo(() => {
++  const splitBadgeInfo = createMemo(() => {
 +    const s = props.session
-+    if (!split?.active() || !s) return undefined
-+    const idx = split.sessionPaneIndex(props.server, s.id)
-+    if (idx < 0) return undefined
-+    const count = split.count()
-+    if (count === 2) {
-+      return idx === 0 ? language.t("splitView.badge.left") : language.t("splitView.badge.right")
++    if (!split || !s) return undefined
++    const info = split.sessionSplitBadge(props.server, s.id)
++    if (!info) return undefined
++    const label =
++      info.count === 2
++        ? info.index === 0
++          ? language.t("splitView.badge.left")
++          : language.t("splitView.badge.right")
++        : info.index === 0
++          ? language.t("splitView.badge.left")
++          : info.index === 1
++            ? language.t("splitView.badge.middle")
++            : language.t("splitView.badge.right")
++    return {
++      label,
++      activeGroup: info.activeGroup,
 +    }
-+    if (idx === 0) return language.t("splitView.badge.left")
-+    if (idx === 1) return language.t("splitView.badge.middle")
-+    return language.t("splitView.badge.right")
 +  })
 +
 +  const handleTabSplitPointerDown = (e: PointerEvent) => {
@@ -780,6 +800,7 @@ index 77088bf..6c91a39 100644
 +        const outOfStrip = isVert ? dx > 20 : dy > 18
 +        if (!outOfStrip) return
 +        splitDragging = true
++        moveEvent.stopImmediatePropagation()
 +        document.body?.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }))
 +        split.restoreSnapshot(snapshotBeforePress)
 +        split.startPointerDrag({
@@ -792,6 +813,7 @@ index 77088bf..6c91a39 100644
 +          clientY: moveEvent.clientY,
 +        })
 +      } else {
++        moveEvent.stopImmediatePropagation()
 +        split.updatePointerDrag(moveEvent.clientX, moveEvent.clientY)
 +      }
 +    }
@@ -823,7 +845,7 @@ index 77088bf..6c91a39 100644
    const project = createMemo(() => {
      const session = props.session
  
-@@ -265,12 +339,24 @@ export function TabNavItem(props: {
+@@ -265,12 +348,24 @@ export function TabNavItem(props: {
            event.preventDefault()
            event.stopPropagation()
          }}
@@ -848,24 +870,29 @@ index 77088bf..6c91a39 100644
            if (props.suppressNavigation) return
            props.onNavigate()
          }}
-@@ -287,6 +373,16 @@ export function TabNavItem(props: {
+@@ -287,6 +382,21 @@ export function TabNavItem(props: {
          }}
          class="flex h-full min-w-0 flex-1 flex-row items-center gap-1.5 text-[13px] font-medium text-v2-text-text-faint group-data-[active='true']:text-v2-text-text-base group-data-[editing='true']:text-v2-text-text-base [-webkit-user-drag:none]"
        >
-+        <Show when={splitBadgeLabel()}>
-+          {(label) => (
++        <Show when={splitBadgeInfo()}>
++          {(badge) => (
 +            <span
 +              data-slot="tab-split-badge"
-+              class="shrink-0 rounded bg-v2-overlay-simple-overlay-hover px-1 py-0.25 text-[10px] leading-3 [font-weight:580] text-v2-text-text-base"
++              data-active-group={badge().activeGroup ? "true" : "false"}
++              class="shrink-0 rounded px-1 py-0.25 text-[10px] leading-3 [font-weight:580]"
++              classList={{
++                "bg-v2-overlay-simple-overlay-hover text-v2-text-text-base": badge().activeGroup,
++                "bg-v2-overlay-simple-overlay-hover/50 text-v2-text-text-muted": !badge().activeGroup,
++              }}
 +            >
-+              {label()}
++              {badge().label}
 +            </span>
 +          )}
 +        </Show>
          <span data-slot="project-avatar-slot" class="flex size-4 shrink-0 items-center justify-center">
            <Show
              when={props.session}
-@@ -412,6 +508,67 @@ export function TabNavItem(props: {
+@@ -412,6 +522,67 @@ export function TabNavItem(props: {
              openRename()
            }}
          >

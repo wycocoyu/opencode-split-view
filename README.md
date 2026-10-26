@@ -14,6 +14,10 @@
   - 支持同时并排打开最多 3 个分屏（`左屏`、`中屏`、`右屏`），每个分屏通过独立 `@solidjs/router` 上下文（[`SplitPaneProvider`](source/packages/app/src/shell/split-view/context.tsx)）挂载各自的真实会话（[`TargetSessionRouteContent`](source/packages/app/src/shell/split-view/workbench.tsx)）或新建草稿（[`DraftRoute`](source/packages/app/src/shell/split-view/workbench.tsx)）。
   - 各分屏独立管理各自的模型选择、输入框、终端面板、代码变更查看与文件引用。在分屏中提交新建草稿后，自动在当前分屏原位晋升为正式会话。
   - 自动去重与防冲突：同一会话不会在多个分屏重复挂载；若选择已打开的会话，自动聚焦对应分屏或与目标分屏互换位置。
+- **多组独立分屏（Independent Split Groups）与点击只切视图**：
+  - 支持同时保存多组互不干扰的分屏组合（`groups: SplitViewGroup[]`，例如 `[会话 A | 会话 B]` 一组双屏、`[会话 C | 会话 D]` 另一组双屏，其余会话保持单屏）。
+  - **普通点击只切换视图，不覆盖已有分屏**：当 `[会话 A | 会话 B]` 处于双屏模式时，即使先点击了左屏再点击侧栏或顶栏里的单屏 `会话 C`，`[会话 A | 会话 B]` 的分屏组合完好保留在后台，工作区直接切换为 `会话 C` 的独立单屏视图；再次点击 `会话 A` 或 `会话 B` 时，立即恢复 `[会话 A | 会话 B]` 双屏组合并聚焦所点分屏。
+  - **跨组拆合与实时徽章区分**：将已属于某分屏组的会话拖入新分屏时，自动从原分屏组移出（原分屏组若仅剩 1 个会话则自动恢复单屏）；当前激活分屏组的会话显示高亮位置徽章（`左` / `中` / `右`，`data-active-group="true"`），后台分屏组的会话显示柔和半透明徽章（`data-active-group="false"`）。
 - **渐进式指针拖拽投递（Pointer-based Drag & Drop）**：
   - **单屏模式（`1 屏`）**：从原版水平顶栏或纵向标签栏按住任意会话标签向工作区拖动（[`handleTabSplitPointerDown`](source/packages/app/src/shell/titlebar/tab-nav.tsx)），工作区浮现 **放入左屏 / 放入右屏** 两列等宽可视化落点（`50% / 50%`）与跟随光标的浮动预览卡片，松手自动开启左右双屏。
   - **双屏与三屏模式（`2 屏 / 3 屏`）**：当已有两个及以上分屏时，拖入会话标签自动浮现 **放入左屏 / 放入中屏 / 放入右屏** 三列可视化落点，支持顺滑扩展到左中右三屏或替换指定分屏。

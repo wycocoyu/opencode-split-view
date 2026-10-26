@@ -985,8 +985,21 @@ test("split view works standalone with vanilla titlebar tabs without session-sid
   await expect(page.locator('[data-slot="split-pane"][data-pane-index="1"]')).toContainText(b.title)
 
   // Badges appear on vanilla tabs for Left and Right panes
-  await expect(tabA.locator('[data-slot="tab-split-badge"]')).toBeVisible()
-  await expect(tabB.locator('[data-slot="tab-split-badge"]')).toBeVisible()
+  await expect(tabA.locator('[data-slot="tab-split-badge"]')).toHaveAttribute("data-active-group", "true")
+  await expect(tabB.locator('[data-slot="tab-split-badge"]')).toHaveAttribute("data-active-group", "true")
+
+  // Clicking unsplit Tab C switches to a 1-pane view for Tab C while preserving [Tab A | Tab B] in the background
+  await tabC.locator("[data-titlebar-tab-link]").click()
+  await expect(page.locator('[data-slot="split-workbench"]')).toHaveCount(0)
+  await expect(page.getByRole("heading", { name: c.title })).toBeVisible()
+  await expect(tabA.locator('[data-slot="tab-split-badge"]')).toHaveAttribute("data-active-group", "false")
+  await expect(tabB.locator('[data-slot="tab-split-badge"]')).toHaveAttribute("data-active-group", "false")
+
+  // Clicking Tab A restores the [Tab A | Tab B] 2-pane split view intact
+  await tabA.locator("[data-titlebar-tab-link]").click()
+  await expect(page.locator('[data-slot="split-workbench"]')).toHaveAttribute("data-pane-count", "2")
+  await expect(page.locator('[data-slot="split-pane"][data-pane-index="0"]')).toContainText(a.title)
+  await expect(page.locator('[data-slot="split-pane"][data-pane-index="1"]')).toContainText(b.title)
 
   // 2-pane mode: dragging Tab C downward shows Left, Middle, Right drop zones (3 zones)
   const tabCBox = await tabC.boundingBox()

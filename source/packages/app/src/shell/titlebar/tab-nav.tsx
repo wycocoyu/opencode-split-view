@@ -62,18 +62,25 @@ export function TabNavItem(props: {
 
   const unread = () => !!props.session && !props.active && props.unread
 
-  const splitBadgeLabel = createMemo(() => {
+  const splitBadgeInfo = createMemo(() => {
     const s = props.session
-    if (!split?.active() || !s) return undefined
-    const idx = split.sessionPaneIndex(props.server, s.id)
-    if (idx < 0) return undefined
-    const count = split.count()
-    if (count === 2) {
-      return idx === 0 ? language.t("splitView.badge.left") : language.t("splitView.badge.right")
+    if (!split || !s) return undefined
+    const info = split.sessionSplitBadge(props.server, s.id)
+    if (!info) return undefined
+    const label =
+      info.count === 2
+        ? info.index === 0
+          ? language.t("splitView.badge.left")
+          : language.t("splitView.badge.right")
+        : info.index === 0
+          ? language.t("splitView.badge.left")
+          : info.index === 1
+            ? language.t("splitView.badge.middle")
+            : language.t("splitView.badge.right")
+    return {
+      label,
+      activeGroup: info.activeGroup,
     }
-    if (idx === 0) return language.t("splitView.badge.left")
-    if (idx === 1) return language.t("splitView.badge.middle")
-    return language.t("splitView.badge.right")
   })
 
   const handleTabSplitPointerDown = (e: PointerEvent) => {
@@ -94,6 +101,7 @@ export function TabNavItem(props: {
         const outOfStrip = isVert ? dx > 20 : dy > 18
         if (!outOfStrip) return
         splitDragging = true
+        moveEvent.stopImmediatePropagation()
         document.body?.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }))
         split.restoreSnapshot(snapshotBeforePress)
         split.startPointerDrag({
@@ -106,6 +114,7 @@ export function TabNavItem(props: {
           clientY: moveEvent.clientY,
         })
       } else {
+        moveEvent.stopImmediatePropagation()
         split.updatePointerDrag(moveEvent.clientX, moveEvent.clientY)
       }
     }
@@ -373,13 +382,18 @@ export function TabNavItem(props: {
         }}
         class="flex h-full min-w-0 flex-1 flex-row items-center gap-1.5 text-[13px] font-medium text-v2-text-text-faint group-data-[active='true']:text-v2-text-text-base group-data-[editing='true']:text-v2-text-text-base [-webkit-user-drag:none]"
       >
-        <Show when={splitBadgeLabel()}>
-          {(label) => (
+        <Show when={splitBadgeInfo()}>
+          {(badge) => (
             <span
               data-slot="tab-split-badge"
-              class="shrink-0 rounded bg-v2-overlay-simple-overlay-hover px-1 py-0.25 text-[10px] leading-3 [font-weight:580] text-v2-text-text-base"
+              data-active-group={badge().activeGroup ? "true" : "false"}
+              class="shrink-0 rounded px-1 py-0.25 text-[10px] leading-3 [font-weight:580]"
+              classList={{
+                "bg-v2-overlay-simple-overlay-hover text-v2-text-text-base": badge().activeGroup,
+                "bg-v2-overlay-simple-overlay-hover/50 text-v2-text-text-muted": !badge().activeGroup,
+              }}
             >
-              {label()}
+              {badge().label}
             </span>
           )}
         </Show>

@@ -9,6 +9,7 @@ import {
   equalRatios,
   focusAdjacentSplitPane,
   moveSplitPane,
+  navigateToTarget,
   normalizeRatios,
   openInFocusedPane,
   openInSpecificPane,
@@ -16,6 +17,7 @@ import {
   panePositionIndex,
   promoteDraftInSplitView,
   resizePairRatios,
+  sessionSplitBadge,
   setSplitPaneCount,
   type SplitPaneTarget,
   type SplitViewState,
@@ -189,5 +191,63 @@ describe("split-view model", () => {
       sessionId: "s-promoted",
       directory: "/work",
     })
+  })
+
+  test("navigateToTarget preserves independent split groups and opens unsplit sessions in single pane", () => {
+    // 1. Open Session A and split with Session B -> Group 1: [s-a | s-b]
+    let state: SplitViewState = {
+      order: ["pane-0"],
+      byId: { "pane-0": sessionTarget("s-a") },
+      focusedId: "pane-0",
+      ratios: [1],
+    }
+    state = openInSplitPane(state, sessionTarget("s-b"), "right")
+    expect(state.order.length).toBe(2)
+    expect(panePositionIndex(state, server, "s-a")).toBe(0)
+    expect(panePositionIndex(state, server, "s-b")).toBe(1)
+
+    // Focus Left Pane (s-a), then click unsplit Session C in the sidebar
+    state = navigateToTarget(state, sessionTarget("s-a"))
+    expect(state.focusedId).toBe(state.order[0]!)
+    state = navigateToTarget(state, sessionTarget("s-c"))
+
+    // Active view becomes 1-pane [s-c], while [s-a | s-b] is preserved in background groups
+    expect(state.order.length).toBe(1)
+    expect(panePositionIndex(state, server, "s-c")).toBe(0)
+    expect(state.groups?.length).toBe(1)
+    expect(sessionSplitBadge(state, server, "s-a")).toEqual({ activeGroup: false, index: 0, count: 2 })
+    expect(sessionSplitBadge(state, server, "s-b")).toEqual({ activeGroup: false, index: 1, count: 2 })
+    expect(sessionSplitBadge(state, server, "s-c")).toBeUndefined()
+
+    // 2. Split Session C with Session D -> Group 2: [s-c | s-d], while Group 1 [s-a | s-b] remains intact
+    state = openInSplitPane(state, sessionTarget("s-d"), "right")
+    expect(state.order.length).toBe(2)
+    expect(panePositionIndex(state, server, "s-c")).toBe(0)
+    expect(panePositionIndex(state, server, "s-d")).toBe(1)
+    expect(state.groups?.length).toBe(2)
+    expect(sessionSplitBadge(state, server, "s-c")).toEqual({ activeGroup: true, index: 0, count: 2 })
+    expect(sessionSplitBadge(state, server, "s-a")).toEqual({ activeGroup: false, index: 0, count: 2 })
+
+    // 3. Click Session B in the sidebar -> switches back to Group 1 [s-a | s-b] with s-b focused
+    state = navigateToTarget(state, sessionTarget("s-b"))
+    expect(state.order.length).toBe(2)
+    expect(panePositionIndex(state, server, "s-a")).toBe(0)
+    expect(panePositionIndex(state, server, "s-b")).toBe(1)
+    expect(state.byId[state.focusedId]).toEqual(sessionTarget("s-b"))
+    expect(state.groups?.length).toBe(2)
+
+    // 4. Click unsplit Session E -> switches to 1-pane [s-e], both [s-a | s-b] and [s-c | s-d] stay saved
+    state = navigateToTarget(state, sessionTarget("s-e"))
+    expect(state.order.length).toBe(1)
+    expect(panePositionIndex(state, server, "s-e")).toBe(0)
+    expect(state.groups?.length).toBe(2)
+
+    // 5. Steal s-b into s-e's split [s-e | s-b] -> Group 1 [s-a | s-b] drops to 1 pane so s-a becomes unsplit
+    state = openInSplitPane(state, sessionTarget("s-b"), "right")
+    expect(state.order.length).toBe(2)
+    expect(panePositionIndex(state, server, "s-e")).toBe(0)
+    expect(panePositionIndex(state, server, "s-b")).toBe(1)
+    expect(sessionSplitBadge(state, server, "s-a")).toBeUndefined()
+    expect(sessionSplitBadge(state, server, "s-c")).toEqual({ activeGroup: false, index: 0, count: 2 })
   })
 })

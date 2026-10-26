@@ -39,16 +39,20 @@ import {
   equalRatios,
   focusAdjacentSplitPane,
   moveSplitPane,
+  navigateToTarget,
   openInFocusedPane,
   openInSpecificPane,
   openInSplitPane,
   panePositionIndex,
   promoteDraftInSplitView,
+  removeSessionsFromSplitView,
   resizePairRatios,
   samePaneTarget,
   sanitizeSplitViewState,
+  sessionSplitBadge as computeSessionSplitBadge,
   setSplitPaneCount,
   SplitViewPersistedSchema,
+  type SessionSplitBadgeInfo,
   type SplitPaneCount,
   type SplitPanePosition,
   type SplitPaneTarget,
@@ -101,6 +105,7 @@ export type SplitViewContextValue = {
   activeDrag: Accessor<ActiveSplitDrag | null>
   paneTarget: (paneId: string) => SplitPaneTarget | undefined
   sessionPaneIndex: (server: ServerConnection.Key | string, sessionId: string) => number
+  sessionSplitBadge: (server: ServerConnection.Key | string, sessionId: string) => SessionSplitBadgeInfo | undefined
   isSessionFocused: (server: ServerConnection.Key | string, sessionId: string) => boolean
   setLayoutCount: (count: SplitPaneCount) => void
   splitRight: (target?: SplitPaneTarget) => void
@@ -168,6 +173,12 @@ export function SplitViewProvider(props: ParentProps) {
       byId: { ...persistedState.byId },
       focusedId: persistedState.focusedId,
       ratios: [...persistedState.ratios],
+      groups: (persistedState.groups ?? []).map((group) => ({
+        order: [...group.order],
+        byId: { ...group.byId },
+        focusedId: group.focusedId,
+        ratios: [...group.ratios],
+      })),
     }),
   )
 
@@ -178,6 +189,7 @@ export function SplitViewProvider(props: ParentProps) {
       setPersistedState("byId", reconcile(clean.byId))
       setPersistedState("focusedId", clean.focusedId)
       setPersistedState("ratios", clean.ratios)
+      setPersistedState("groups", reconcile(clean.groups ?? []))
     })
 
     if (options?.syncUrl !== false) {
@@ -241,11 +253,14 @@ export function SplitViewProvider(props: ParentProps) {
     }
   }
 
-  // Sync global route changes (e.g. clicking sidebar session, clicking new session, or browser back/forward)
-  // into the currently focused pane (or focus the pane that already shows that session/draft).
+  const [activeDrag, setActiveDrag] = createSignal<ActiveSplitDrag | null>(null)
+
+  // Sync global route changes (e.g. clicking sidebar session, clicking new session, or browser back/forward):
+  // - If the route target belongs to the active view or a background saved split group, activate that group and focus its pane.
+  // - Otherwise, preserve existing split groups in the background and switch the active view to a 1-pane view for the route target.
   createEffect(() => {
-    if (!ready() || !tabs.ready()) return
     const route = layout.route()
+    if (!ready() || !tabs.ready() || untrack(activeDrag)) return
 
     untrack(() => {
       const current = state()
@@ -259,8 +274,9 @@ export function SplitViewProvider(props: ParentProps) {
           sessionId: route.sessionId,
           ...(dir ? { directory: dir } : {}),
         }
-        const next = openInFocusedPane(current, target)
+        const next = navigateToTarget(current, target)
         if (
+          next.order.length !== current.order.length ||
           next.focusedId !== current.focusedId ||
           !samePaneTarget(next.byId[next.focusedId], current.byId[current.focusedId])
         ) {
@@ -278,8 +294,9 @@ export function SplitViewProvider(props: ParentProps) {
           server: draftTab?.type === "draft" ? draftTab.server : fallback.server,
           directory: draftTab?.type === "draft" ? draftTab.directory : fallback.directory,
         }
-        const next = openInFocusedPane(current, target)
+        const next = navigateToTarget(current, target)
         if (
+          next.order.length !== current.order.length ||
           next.focusedId !== current.focusedId ||
           !samePaneTarget(next.byId[next.focusedId], current.byId[current.focusedId])
         ) {
@@ -335,27 +352,13 @@ export function SplitViewProvider(props: ParentProps) {
     }
   })
 
-  // Handle deleted or archived sessions across split panes
+  // Handle deleted or archived sessions across split panes and saved split groups
   makeEventListener(window, SESSION_TABS_REMOVED_EVENT, (event) => {
     const detail = readSessionTabsRemovedDetail(event)
     if (!detail) return
     const removedSet = new Set(detail.sessionIDs)
-    let current = state()
-    let changed = false
-
-    for (const paneId of [...current.order]) {
-      const target = current.byId[paneId]
-      if (target?.type === "session" && target.server === detail.server && removedSet.has(target.sessionId)) {
-        if (current.order.length > 1) {
-          current = closeSplitPane(current, paneId)
-          changed = true
-        }
-      }
-    }
-
-    if (changed) {
-      commitState(current)
-    }
+    const next = removeSessionsFromSplitView(state(), detail.server, removedSet)
+    commitState(next)
   })
 
   const count = createMemo<SplitPaneCount>(() => clampPaneCount(state().order.length))
@@ -369,6 +372,9 @@ export function SplitViewProvider(props: ParentProps) {
 
   const sessionPaneIndex = (server: ServerConnection.Key | string, sessionId: string) =>
     panePositionIndex(state(), server, sessionId)
+
+  const sessionSplitBadge = (server: ServerConnection.Key | string, sessionId: string) =>
+    computeSessionSplitBadge(state(), server, sessionId)
 
   const isSessionFocused = (server: ServerConnection.Key | string, sessionId: string) => {
     const current = state()
@@ -479,7 +485,6 @@ export function SplitViewProvider(props: ParentProps) {
     )
   }
 
-  const [activeDrag, setActiveDrag] = createSignal<ActiveSplitDrag | null>(null)
   let dropPositionResolver: ((clientX: number, clientY: number) => SplitPanePosition | null) | undefined
 
   const registerDropPositionResolver = (
@@ -607,12 +612,24 @@ export function SplitViewProvider(props: ParentProps) {
   const resizeColumns = (leftIndex: number, deltaRatio: number) => {
     const current = state()
     const nextRatios = resizePairRatios(current.ratios, leftIndex, deltaRatio)
-    setPersistedState("ratios", nextRatios)
+    commitState(
+      {
+        ...current,
+        ratios: nextRatios,
+      },
+      { syncUrl: false },
+    )
   }
 
   const resetColumnRatios = () => {
     const current = state()
-    setPersistedState("ratios", equalRatios(current.order.length))
+    commitState(
+      {
+        ...current,
+        ratios: equalRatios(current.order.length),
+      },
+      { syncUrl: false },
+    )
   }
 
   const restoreSnapshot = (snapshot: SplitViewState) => {
@@ -693,6 +710,7 @@ export function SplitViewProvider(props: ParentProps) {
     activeDrag,
     paneTarget,
     sessionPaneIndex,
+    sessionSplitBadge,
     isSessionFocused,
     setLayoutCount,
     splitRight,

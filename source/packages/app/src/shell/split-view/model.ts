@@ -29,18 +29,36 @@ export const SplitPaneTargetSchema = Schema.Union([SessionPaneTargetSchema, Draf
 
 export type SplitPaneTarget = typeof SplitPaneTargetSchema.Type
 
-export const SplitViewPersistedSchema = Persistence.struct({
+export const SplitViewGroupSchema = Persistence.struct({
   order: Persistence.array(Schema.String),
   byId: Persistence.record(SplitPaneTargetSchema),
   focusedId: Schema.String,
   ratios: Persistence.array(Schema.Finite),
 })
 
-export type SplitViewState = {
+export type SplitViewGroup = {
   order: string[]
   byId: Record<string, SplitPaneTarget>
   focusedId: string
   ratios: number[]
+}
+
+export const SplitViewPersistedSchema = Persistence.struct({
+  order: Persistence.array(Schema.String),
+  byId: Persistence.record(SplitPaneTargetSchema),
+  focusedId: Schema.String,
+  ratios: Persistence.array(Schema.Finite),
+  groups: Schema.optional(Persistence.array(SplitViewGroupSchema)),
+})
+
+export type SplitViewState = SplitViewGroup & {
+  groups?: SplitViewGroup[]
+}
+
+export type SessionSplitBadgeInfo = {
+  activeGroup: boolean
+  index: number
+  count: SplitPaneCount
 }
 
 export const DEFAULT_PANE_ID = "pane-0"
@@ -51,6 +69,7 @@ export function createInitialSplitViewState(): SplitViewState {
     byId: {},
     focusedId: DEFAULT_PANE_ID,
     ratios: [1],
+    groups: [],
   }
 }
 
@@ -114,7 +133,7 @@ export function samePaneTarget(a: SplitPaneTarget | undefined, b: SplitPaneTarge
   return paneTargetKey(a) === paneTargetKey(b)
 }
 
-export function findPaneIdByTarget(state: SplitViewState, target: SplitPaneTarget): string | undefined {
+export function findPaneIdByTarget(state: SplitViewGroup, target: SplitPaneTarget): string | undefined {
   const key = paneTargetKey(target)
   return state.order.find((paneId) => {
     const item = state.byId[paneId]
@@ -123,7 +142,7 @@ export function findPaneIdByTarget(state: SplitViewState, target: SplitPaneTarge
 }
 
 export function findPaneIdBySession(
-  state: SplitViewState,
+  state: SplitViewGroup,
   server: ServerConnection.Key | string,
   sessionId: string,
 ): string | undefined {
@@ -134,7 +153,7 @@ export function findPaneIdBySession(
 }
 
 export function panePositionIndex(
-  state: SplitViewState,
+  state: SplitViewGroup,
   server: ServerConnection.Key | string,
   sessionId: string,
 ): number {
@@ -142,7 +161,38 @@ export function panePositionIndex(
   return paneId ? state.order.indexOf(paneId) : -1
 }
 
-export function sanitizeSplitViewState(raw: SplitViewState): SplitViewState {
+export function sessionSplitBadge(
+  state: SplitViewState,
+  server: ServerConnection.Key | string,
+  sessionId: string,
+): SessionSplitBadgeInfo | undefined {
+  if (state.order.length > 1) {
+    const activeIdx = panePositionIndex(state, server, sessionId)
+    if (activeIdx >= 0) {
+      return {
+        activeGroup: true,
+        index: activeIdx,
+        count: clampPaneCount(state.order.length),
+      }
+    }
+  }
+
+  for (const group of state.groups ?? []) {
+    if (group.order.length <= 1) continue
+    const idx = panePositionIndex(group, server, sessionId)
+    if (idx >= 0) {
+      return {
+        activeGroup: false,
+        index: idx,
+        count: clampPaneCount(group.order.length),
+      }
+    }
+  }
+
+  return undefined
+}
+
+function sanitizeGroup(raw: SplitViewGroup): SplitViewGroup {
   const uniqueOrder: string[] = []
   const seenTargets = new Set<string>()
 
@@ -179,12 +229,159 @@ export function sanitizeSplitViewState(raw: SplitViewState): SplitViewState {
   }
 }
 
+function isMultiPaneGroup(group: SplitViewGroup): boolean {
+  if (group.order.length < 2) return false
+  let count = 0
+  for (const id of group.order) {
+    if (group.byId[id]) count++
+  }
+  return count >= 2
+}
+
+function targetKeysOf(group: SplitViewGroup): Set<string> {
+  const keys = new Set<string>()
+  for (const id of group.order) {
+    const target = group.byId[id]
+    if (target) keys.add(paneTargetKey(target))
+  }
+  return keys
+}
+
+function pruneAndSyncGroups(
+  existingGroups: readonly SplitViewGroup[] | undefined,
+  pruneKeys: ReadonlySet<string>,
+  activeToSave?: SplitViewGroup,
+): SplitViewGroup[] {
+  const seenKeys = new Set<string>(pruneKeys)
+  const result: SplitViewGroup[] = []
+
+  for (const rawGroup of existingGroups ?? []) {
+    const clean = sanitizeGroup(rawGroup)
+    const keptOrder: string[] = []
+    const keptById: Record<string, SplitPaneTarget> = {}
+
+    for (const id of clean.order) {
+      const target = clean.byId[id]
+      if (!target) continue
+      const key = paneTargetKey(target)
+      if (seenKeys.has(key)) continue
+      seenKeys.add(key)
+      keptOrder.push(id)
+      keptById[id] = { ...target }
+    }
+
+    if (keptOrder.length >= 2) {
+      const nextFocused = keptOrder.includes(clean.focusedId) ? clean.focusedId : keptOrder[0]!
+      const nextRatios =
+        keptOrder.length === clean.order.length ? normalizeRatios(clean.ratios, keptOrder.length) : equalRatios(keptOrder.length)
+      result.push({
+        order: keptOrder,
+        byId: keptById,
+        focusedId: nextFocused,
+        ratios: nextRatios,
+      })
+    }
+  }
+
+  if (activeToSave && isMultiPaneGroup(activeToSave)) {
+    result.push(sanitizeGroup(activeToSave))
+  }
+
+  return result
+}
+
+export function sanitizeSplitViewState(raw: SplitViewState): SplitViewState {
+  const active = sanitizeGroup(raw)
+  const activeMulti = isMultiPaneGroup(active)
+  const prune = activeMulti ? targetKeysOf(active) : new Set<string>()
+  const groups = pruneAndSyncGroups(raw.groups, prune, activeMulti ? active : undefined)
+
+  return {
+    ...active,
+    groups,
+  }
+}
+
+function commitSplitMutation(prev: SplitViewState, nextActiveRaw: SplitViewGroup): SplitViewState {
+  const current = sanitizeSplitViewState(prev)
+  const nextActive = sanitizeGroup(nextActiveRaw)
+  const prune = new Set<string>([...targetKeysOf(current), ...targetKeysOf(nextActive)])
+  const nextMulti = isMultiPaneGroup(nextActive)
+  const groups = pruneAndSyncGroups(current.groups, prune, nextMulti ? nextActive : undefined)
+
+  return {
+    ...nextActive,
+    groups,
+  }
+}
+
 function nextPaneId(existingOrder: readonly string[]): string {
   for (let i = 0; i < 16; i++) {
     const candidate = `pane-${i}`
     if (!existingOrder.includes(candidate)) return candidate
   }
   return `pane-${Date.now()}`
+}
+
+/**
+ * Normal navigation (e.g. clicking a session in the sidebar or tab bar):
+ * 1. If the target is already in the currently visible view, focus its pane without altering the split layout.
+ * 2. If the target belongs to a saved background split group, switch to that split group and focus its pane.
+ * 3. Otherwise, preserve any current multi-pane split group in `groups` and switch to a 1-pane view for `target`.
+ */
+export function navigateToTarget(state: SplitViewState, target: SplitPaneTarget): SplitViewState {
+  const current = sanitizeSplitViewState(state)
+  const existingPaneId = findPaneIdByTarget(current, target)
+  if (existingPaneId) {
+    const prevTarget = current.byId[existingPaneId]
+    const mergedTarget: SplitPaneTarget =
+      target.type === "session" && !target.directory && prevTarget?.directory
+        ? { ...target, directory: prevTarget.directory }
+        : { ...target }
+    return commitSplitMutation(current, {
+      ...current,
+      byId: {
+        ...current.byId,
+        [existingPaneId]: mergedTarget,
+      },
+      focusedId: existingPaneId,
+    })
+  }
+
+  for (const group of current.groups ?? []) {
+    const matchedPaneId = findPaneIdByTarget(group, target)
+    if (!matchedPaneId) continue
+    const prevTarget = group.byId[matchedPaneId]
+    const mergedTarget: SplitPaneTarget =
+      target.type === "session" && !target.directory && prevTarget?.directory
+        ? { ...target, directory: prevTarget.directory }
+        : { ...target }
+    const activatedGroup: SplitViewGroup = {
+      order: [...group.order],
+      byId: {
+        ...group.byId,
+        [matchedPaneId]: mergedTarget,
+      },
+      focusedId: matchedPaneId,
+      ratios: [...group.ratios],
+    }
+    const groups = pruneAndSyncGroups(current.groups, targetKeysOf(activatedGroup), activatedGroup)
+    return {
+      ...sanitizeGroup(activatedGroup),
+      groups,
+    }
+  }
+
+  const singlePaneId = current.order.length === 1 ? (current.order[0] ?? DEFAULT_PANE_ID) : DEFAULT_PANE_ID
+  return {
+    order: [singlePaneId],
+    byId: {
+      [singlePaneId]: { ...target },
+    },
+    focusedId: singlePaneId,
+    ratios: [1],
+    groups: current.groups ?? [],
+  }
 }
 
 export function openInFocusedPane(state: SplitViewState, target: SplitPaneTarget): SplitViewState {
@@ -195,28 +392,28 @@ export function openInFocusedPane(state: SplitViewState, target: SplitPaneTarget
       const prev = current.byId[existingPaneId]
       if (prev && prev.directory === target.directory) return current
     }
-    return {
+    return commitSplitMutation(current, {
       ...current,
       byId: {
         ...current.byId,
         [existingPaneId]: target,
       },
       focusedId: existingPaneId,
-    }
+    })
   }
 
   const focusedId = current.order.includes(current.focusedId)
     ? current.focusedId
     : (current.order[0] ?? DEFAULT_PANE_ID)
 
-  return {
+  return commitSplitMutation(current, {
     ...current,
     byId: {
       ...current.byId,
       [focusedId]: target,
     },
     focusedId,
-  }
+  })
 }
 
 export function openInSpecificPane(state: SplitViewState, paneId: string, target: SplitPaneTarget): SplitViewState {
@@ -235,21 +432,21 @@ export function openInSpecificPane(state: SplitViewState, paneId: string, target
     } else {
       delete nextById[existingPaneId]
     }
-    return {
+    return commitSplitMutation(current, {
       ...current,
       byId: nextById,
       focusedId: paneId,
-    }
+    })
   }
 
-  return {
+  return commitSplitMutation(current, {
     ...current,
     byId: {
       ...current.byId,
       [paneId]: target,
     },
     focusedId: paneId,
-  }
+  })
 }
 
 export function openInSplitPane(
@@ -262,14 +459,14 @@ export function openInSplitPane(
 
   // If already open in a pane and no explicit drop position was requested, just focus that pane
   if (existingPaneId && !position) {
-    return {
+    return commitSplitMutation(current, {
       ...current,
       byId: {
         ...current.byId,
         [existingPaneId]: target,
       },
       focusedId: existingPaneId,
-    }
+    })
   }
 
   // If already open and an explicit drop position was requested, move that pane to the requested slot
@@ -278,20 +475,20 @@ export function openInSplitPane(
       position === "left" ? 0 : position === "middle" ? Math.min(1, current.order.length - 1) : current.order.length - 1
     const currentIdx = current.order.indexOf(existingPaneId)
     if (currentIdx === targetIdx) {
-      return {
+      return commitSplitMutation(current, {
         ...current,
         focusedId: existingPaneId,
-      }
+      })
     }
     const nextOrder = [...current.order]
     nextOrder.splice(currentIdx, 1)
     nextOrder.splice(targetIdx, 0, existingPaneId)
-    return {
+    return commitSplitMutation(current, {
       ...current,
       order: nextOrder,
       focusedId: existingPaneId,
       ratios: equalRatios(nextOrder.length),
-    }
+    })
   }
 
   // Room to add a new split pane (1 -> 2, or 2 -> 3)
@@ -309,7 +506,7 @@ export function openInSplitPane(
       const insertAt = focusedIndex >= 0 ? focusedIndex + 1 : nextOrder.length
       nextOrder.splice(insertAt, 0, newId)
     }
-    return {
+    return commitSplitMutation(current, {
       order: nextOrder,
       byId: {
         ...current.byId,
@@ -317,7 +514,7 @@ export function openInSplitPane(
       },
       focusedId: newId,
       ratios: equalRatios(nextOrder.length),
-    }
+    })
   }
 
   // Already at max (3 panes: Left / Middle / Right) -> replace the appropriate pane
@@ -330,14 +527,14 @@ export function openInSplitPane(
           ? 2
           : Math.max(0, current.order.indexOf(current.focusedId))
   const replacePaneId = current.order[replaceIndex] ?? current.focusedId
-  return {
+  return commitSplitMutation(current, {
     ...current,
     byId: {
       ...current.byId,
       [replacePaneId]: target,
     },
     focusedId: replacePaneId,
-  }
+  })
 }
 
 export function setSplitPaneCount(
@@ -359,12 +556,12 @@ export function setSplitPaneCount(
         ? current.focusedId
         : (current.order[0] ?? DEFAULT_PANE_ID)
       const keptTarget = current.byId[keepId]
-      return {
+      return commitSplitMutation(current, {
         order: [keepId],
         byId: keptTarget ? { [keepId]: keptTarget } : {},
         focusedId: keepId,
         ratios: [1],
-      }
+      })
     }
 
     // 3 -> 2: keep the focused pane; drop the rightmost unfocused pane
@@ -376,20 +573,21 @@ export function setSplitPaneCount(
       if (t) nextById[id] = t
     }
     const nextFocused = nextOrder.includes(current.focusedId) ? current.focusedId : (nextOrder[0] ?? DEFAULT_PANE_ID)
-    return {
+    return commitSplitMutation(current, {
       order: nextOrder,
       byId: nextById,
       focusedId: nextFocused,
       ratios: equalRatios(nextOrder.length),
-    }
+    })
   }
 
   // Expanding panes (1 -> 2, 1 -> 3, or 2 -> 3)
-  let nextState = {
+  const nextState: SplitViewState = {
     order: [...current.order],
     byId: { ...current.byId },
     focusedId: current.focusedId,
     ratios: [...current.ratios],
+    groups: current.groups,
   }
 
   while (nextState.order.length < desired) {
@@ -402,7 +600,7 @@ export function setSplitPaneCount(
     nextState.ratios = equalRatios(nextState.order.length)
   }
 
-  return sanitizeSplitViewState(nextState)
+  return commitSplitMutation(current, nextState)
 }
 
 export function closeSplitPane(state: SplitViewState, paneId: string): SplitViewState {
@@ -421,12 +619,12 @@ export function closeSplitPane(state: SplitViewState, paneId: string): SplitView
       ? (nextOrder[Math.min(index, nextOrder.length - 1)] ?? nextOrder[0] ?? DEFAULT_PANE_ID)
       : current.focusedId
 
-  return {
+  return commitSplitMutation(current, {
     order: nextOrder,
     byId: nextById,
     focusedId: nextFocusedId,
     ratios: equalRatios(nextOrder.length),
-  }
+  })
 }
 
 export function moveSplitPane(state: SplitViewState, paneId: string, direction: "left" | "right"): SplitViewState {
@@ -448,11 +646,11 @@ export function moveSplitPane(state: SplitViewState, paneId: string, direction: 
   nextRatios[index] = nextRatios[targetIndex] ?? 1 / nextOrder.length
   nextRatios[targetIndex] = tempRatio
 
-  return {
+  return commitSplitMutation(current, {
     ...current,
     order: nextOrder,
     ratios: normalizeRatios(nextRatios, nextOrder.length),
-  }
+  })
 }
 
 export function focusAdjacentSplitPane(state: SplitViewState, delta: -1 | 1): SplitViewState {
@@ -463,10 +661,10 @@ export function focusAdjacentSplitPane(state: SplitViewState, delta: -1 | 1): Sp
   const nextIndex = (index + delta + current.order.length) % current.order.length
   const nextFocused = current.order[nextIndex] ?? current.focusedId
 
-  return {
+  return commitSplitMutation(current, {
     ...current,
     focusedId: nextFocused,
-  }
+  })
 }
 
 export function promoteDraftInSplitView(
@@ -490,10 +688,85 @@ export function promoteDraftInSplitView(
     }
   }
 
+  const nextGroups = (state.groups ?? []).map((group) => {
+    let groupChanged = false
+    const groupById = { ...group.byId }
+    for (const paneId of group.order) {
+      const target = groupById[paneId]
+      if (target?.type === "draft" && target.draftID === draftID) {
+        groupById[paneId] = {
+          type: "session",
+          server: session.server,
+          sessionId: session.sessionId,
+          directory: session.directory ?? target.directory,
+        }
+        groupChanged = true
+        changed = true
+      }
+    }
+    return groupChanged ? { ...group, byId: groupById } : group
+  })
+
   if (!changed) return state
   return sanitizeSplitViewState({
     ...state,
     byId: nextById,
+    groups: nextGroups,
+  })
+}
+
+export function removeSessionsFromSplitView(
+  state: SplitViewState,
+  server: ServerConnection.Key | string,
+  removedIds: ReadonlySet<string>,
+): SplitViewState {
+  const current = sanitizeSplitViewState(state)
+  const prunedGroups: SplitViewGroup[] = []
+
+  for (const group of current.groups ?? []) {
+    const keptOrder = group.order.filter((paneId) => {
+      const t = group.byId[paneId]
+      return !(t?.type === "session" && t.server === server && removedIds.has(t.sessionId))
+    })
+    if (keptOrder.length >= 2) {
+      const keptById: Record<string, SplitPaneTarget> = {}
+      for (const id of keptOrder) {
+        const t = group.byId[id]
+        if (t) keptById[id] = { ...t }
+      }
+      prunedGroups.push(
+        sanitizeGroup({
+          order: keptOrder,
+          byId: keptById,
+          focusedId: keptOrder.includes(group.focusedId) ? group.focusedId : keptOrder[0]!,
+          ratios: equalRatios(keptOrder.length),
+        }),
+      )
+    }
+  }
+
+  let nextOrder = [...current.order]
+  const nextById = { ...current.byId }
+  for (const paneId of current.order) {
+    const t = nextById[paneId]
+    if (t?.type === "session" && t.server === server && removedIds.has(t.sessionId)) {
+      if (nextOrder.length > 1) {
+        nextOrder = nextOrder.filter((id) => id !== paneId)
+        delete nextById[paneId]
+      }
+    }
+  }
+
+  const nextFocused = nextOrder.includes(current.focusedId)
+    ? current.focusedId
+    : (nextOrder[0] ?? DEFAULT_PANE_ID)
+
+  return sanitizeSplitViewState({
+    order: nextOrder,
+    byId: nextById,
+    focusedId: nextFocused,
+    ratios: equalRatios(nextOrder.length),
+    groups: prunedGroups,
   })
 }
 
