@@ -10,6 +10,7 @@ import {
   untrack,
   useContext,
 } from "solid-js"
+import { reconcile } from "solid-js/store"
 import {
   RouterContext,
   useLocation,
@@ -119,6 +120,7 @@ export type SplitViewContextValue = {
   maximizePane: (paneId: string) => void
   resizeColumns: (leftIndex: number, deltaRatio: number) => void
   resetColumnRatios: () => void
+  restoreSnapshot: (snapshot: SplitViewState) => void
   startPointerDrag: (input: Omit<ActiveSplitDrag, "hoverPosition">) => void
   updatePointerDrag: (clientX: number, clientY: number) => void
   endPointerDrag: (clientX: number, clientY: number) => boolean
@@ -173,7 +175,7 @@ export function SplitViewProvider(props: ParentProps) {
     const clean = sanitizeSplitViewState(next)
     batch(() => {
       setPersistedState("order", clean.order)
-      setPersistedState("byId", clean.byId)
+      setPersistedState("byId", reconcile(clean.byId))
       setPersistedState("focusedId", clean.focusedId)
       setPersistedState("ratios", clean.ratios)
     })
@@ -613,6 +615,10 @@ export function SplitViewProvider(props: ParentProps) {
     setPersistedState("ratios", equalRatios(current.order.length))
   }
 
+  const restoreSnapshot = (snapshot: SplitViewState) => {
+    commitState(snapshot)
+  }
+
   command.register("split-view", () => [
     {
       id: "split.layout.1",
@@ -703,6 +709,7 @@ export function SplitViewProvider(props: ParentProps) {
     maximizePane,
     resizeColumns,
     resetColumnRatios,
+    restoreSnapshot,
     startPointerDrag,
     updatePointerDrag,
     endPointerDrag,

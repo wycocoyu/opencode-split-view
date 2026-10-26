@@ -23,12 +23,11 @@ import { useGlobal } from "@/runtime/server/runtime"
 import { SessionPanelFrame, SessionRouteFrame } from "@/session/session-frame"
 import { useSettingsSurface } from "@/settings/surface"
 import { useCommand } from "@/shell/commands/command"
-import { normalizeSessionTitle } from "@/shell/session-sidebar/model"
 import { useLayout } from "@/shell/state/layout"
 import { tabKey, useTabs } from "@/shell/tabs/tabs"
 import { sessionTabTitle } from "@/shell/titlebar/tab-title"
 import { SplitPaneProvider, useSplitPane, useSplitView } from "./context"
-import type { SplitPaneCount, SplitPanePosition, SplitPaneTarget } from "./model"
+import { cleanSplitSessionTitle, type SplitPaneCount, type SplitPanePosition, type SplitPaneTarget } from "./model"
 
 export const SESSION_DRAG_MIME = "application/x-opencode-session"
 
@@ -260,7 +259,7 @@ function SplitPaneHeader() {
     const activeIds = ctx?.data.session.active() ?? []
     const tabMeta = tabs.info[tabKey({ type: "session", server: target.server, sessionId: target.sessionId })]
     const rawTitle = info?.title ?? tabMeta?.title
-    const normalized = normalizeSessionTitle(rawTitle) || sessionTabTitle(rawTitle, language.t("session.tab.session"))
+    const normalized = cleanSplitSessionTitle(rawTitle) || sessionTabTitle(rawTitle, language.t("session.tab.session"))
     const dir = info?.location.directory || tabMeta?.directory || target.directory || ""
 
     return {
@@ -685,7 +684,7 @@ export function SplitWorkbench(props: ParentProps) {
     if (pos === "left") return language.t("splitView.drop.left")
     if (pos === "middle") return language.t("splitView.drop.middle")
     if (pos === "right") return language.t("splitView.drop.right")
-    return language.t("sessionSidebar.action.openSplit")
+    return language.t("splitView.action.openSplit")
   }
 
   const handleDragOver = (e: DragEvent) => {

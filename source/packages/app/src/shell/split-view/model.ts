@@ -165,7 +165,7 @@ export function sanitizeSplitViewState(raw: SplitViewState): SplitViewState {
   const byId: Record<string, SplitPaneTarget> = {}
   for (const id of uniqueOrder) {
     const target = raw.byId[id]
-    if (target) byId[id] = target
+    if (target) byId[id] = { ...target }
   }
 
   const focusedId = uniqueOrder.includes(raw.focusedId) ? raw.focusedId : (uniqueOrder[0] ?? DEFAULT_PANE_ID)
@@ -495,4 +495,26 @@ export function promoteDraftInSplitView(
     ...state,
     byId: nextById,
   })
+}
+
+export function cleanSplitSessionTitle(value: string | undefined): string {
+  const raw = value?.trim() ?? ""
+  if (!raw) return ""
+  if (raw.startsWith("{") || raw.startsWith("[")) {
+    try {
+      const parsed: unknown = JSON.parse(raw)
+      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+        const obj = parsed as Record<string, unknown>
+        for (const key of ["text", "title", "prompt", "content", "message"]) {
+          if (typeof obj[key] === "string" && obj[key].trim()) {
+            return obj[key].trim().replace(/\s+/g, " ")
+          }
+        }
+      }
+    } catch {
+      // fall through
+    }
+  }
+  if (/^New session\s*-\s*\d{4}-\d{2}-\d{2}T/i.test(raw)) return ""
+  return raw.replace(/\s+/g, " ")
 }

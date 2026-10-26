@@ -55,7 +55,7 @@ const macTrafficLightsTopClearance = 28
 // titlebar row stays 16px clear of it, as ChatGPT's phone header does. Without one, 8px matches the content gap below.
 const mobileTopClearance = "max(8px, min(16px, env(safe-area-inset-top, 0px) * 1000))"
 
-export function Titlebar(props: { hideSessionTabs?: boolean; verticalTabs?: { mount?: HTMLElement } }) {
+export function Titlebar(props: { verticalTabs?: { mount?: HTMLElement } }) {
   const platform = usePlatform()
   const command = useCommand()
   const language = useLanguage()
@@ -683,22 +683,20 @@ export function Titlebar(props: { hideSessionTabs?: boolean; verticalTabs?: { mo
                     when={props.verticalTabs}
                     fallback={
                       <>
-                        <Show when={!props.hideSessionTabs}>
-                          <TitlebarTabStrip
-                            tabs={tabsStore}
-                            currentTab={currentTab()}
-                            onNavigate={(tab, el) => {
-                              tabs.select(tab)
-                              el?.scrollIntoView({ behavior: "instant" })
-                            }}
-                            onClose={(tab) => {
-                              const index = tabsStore.findIndex((item) => tabKey(item) === tabKey(tab))
+                        <TitlebarTabStrip
+                          tabs={tabsStore}
+                          currentTab={currentTab()}
+                          onNavigate={(tab, el) => {
+                            tabs.select(tab)
+                            el?.scrollIntoView({ behavior: "instant" })
+                          }}
+                          onClose={(tab) => {
+                            const index = tabsStore.findIndex((item) => tabKey(item) === tabKey(tab))
 
-                              if (index !== -1) tabsStoreActions.closeTab(index)
-                            }}
-                            onReorder={(keys) => tabsStoreActions.reorder(keys)}
-                          />
-                        </Show>
+                            if (index !== -1) tabsStoreActions.closeTab(index)
+                          }}
+                          onReorder={(keys) => tabsStoreActions.reorder(keys)}
+                        />
                         <RecentlyClosedTabsMenu
                           onNewTab={openNewTab}
                           tooltip={
@@ -734,6 +732,7 @@ export function Titlebar(props: { hideSessionTabs?: boolean; verticalTabs?: { mo
                               onNewTab={openNewTab}
                               keybind={command.keybind("tab.new")}
                             />
+                            <SplitLayoutSwitcher compact showSplitAction class="mt-1.5 self-start" />
                             <div class="h-4 w-full shrink-0" aria-hidden="true" />
                             <div class="flex min-h-0 flex-1 flex-col gap-1">
                               <TitlebarTabStrip
@@ -767,9 +766,9 @@ export function Titlebar(props: { hideSessionTabs?: boolean; verticalTabs?: { mo
                   <div class="flex-1" />
                 </Show>
                 <Show when={!props.verticalTabs}>
-                  <div class="relative z-20 flex shrink-0 items-center justify-end gap-1.5 overflow-visible">
+                  <div class="relative z-20 flex shrink-0 items-center justify-end gap-0 overflow-visible">
                     <Show when={!mobile()}>
-                      <SplitLayoutSwitcher showSplitAction />
+                      <SplitLayoutSwitcher showSplitAction class="me-1.5" />
                     </Show>
                     <TitlebarItems items={titlebarItems} />
                     <TitlebarRightMount />

@@ -62,6 +62,78 @@ export function TabNavItem(props: {
 
   const unread = () => !!props.session && !props.active && props.unread
 
+  const splitBadgeLabel = createMemo(() => {
+    const s = props.session
+    if (!split?.active() || !s) return undefined
+    const idx = split.sessionPaneIndex(props.server, s.id)
+    if (idx < 0) return undefined
+    const count = split.count()
+    if (count === 2) {
+      return idx === 0 ? language.t("splitView.badge.left") : language.t("splitView.badge.right")
+    }
+    if (idx === 0) return language.t("splitView.badge.left")
+    if (idx === 1) return language.t("splitView.badge.middle")
+    return language.t("splitView.badge.right")
+  })
+
+  const handleTabSplitPointerDown = (e: PointerEvent) => {
+    if (e.button !== 0 || !split || editing() || !props.session) return
+    const startX = e.clientX
+    const startY = e.clientY
+    const s = props.session
+    const tabTitle = title() || language.t("session.tab.session")
+    const isVert = props.orientation === "vertical"
+    const snapshotBeforePress = split.state()
+    let splitDragging = false
+
+    const onMove = (moveEvent: PointerEvent) => {
+      const dx = moveEvent.clientX - startX
+      const dy = moveEvent.clientY - startY
+      if (!splitDragging) {
+        // Only activate split-workbench drag when dragging perpendicular/out of the tab strip into the workbench
+        const outOfStrip = isVert ? dx > 20 : dy > 18
+        if (!outOfStrip) return
+        splitDragging = true
+        document.body?.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }))
+        split.restoreSnapshot(snapshotBeforePress)
+        split.startPointerDrag({
+          kind: "session",
+          title: tabTitle,
+          directory: s.location.directory,
+          server: props.server,
+          sessionId: s.id,
+          clientX: moveEvent.clientX,
+          clientY: moveEvent.clientY,
+        })
+      } else {
+        split.updatePointerDrag(moveEvent.clientX, moveEvent.clientY)
+      }
+    }
+
+    const cleanup = () => {
+      window.removeEventListener("pointermove", onMove, true)
+      window.removeEventListener("pointerup", onUp, true)
+      window.removeEventListener("pointercancel", onCancel, true)
+    }
+
+    const onUp = (upEvent: PointerEvent) => {
+      cleanup()
+      if (!splitDragging) return
+      split.restoreSnapshot(snapshotBeforePress)
+      split.endPointerDrag(upEvent.clientX, upEvent.clientY)
+    }
+
+    const onCancel = () => {
+      cleanup()
+      if (!splitDragging) return
+      split.cancelPointerDrag()
+    }
+
+    window.addEventListener("pointermove", onMove, true)
+    window.addEventListener("pointerup", onUp, true)
+    window.addEventListener("pointercancel", onCancel, true)
+  }
+
   const project = createMemo(() => {
     const session = props.session
 
@@ -267,11 +339,23 @@ export function TabNavItem(props: {
           event.preventDefault()
           event.stopPropagation()
         }}
+        onPointerDown={handleTabSplitPointerDown}
         onMouseDown={(event) => {
           // Navigate on mousedown to shave the press-release delay off tab switches.
           if (event.button !== 0) return
 
           if (editing()) return
+
+          if ((event.altKey || event.metaKey || event.ctrlKey) && split && props.session) {
+            event.preventDefault()
+            event.stopPropagation()
+            split.openSessionInSplit({
+              server: props.server,
+              sessionId: props.session.id,
+              directory: props.session.location.directory,
+            })
+            return
+          }
 
           if (props.suppressNavigation) return
           props.onNavigate()
@@ -289,6 +373,16 @@ export function TabNavItem(props: {
         }}
         class="flex h-full min-w-0 flex-1 flex-row items-center gap-1.5 text-[13px] font-medium text-v2-text-text-faint group-data-[active='true']:text-v2-text-text-base group-data-[editing='true']:text-v2-text-text-base [-webkit-user-drag:none]"
       >
+        <Show when={splitBadgeLabel()}>
+          {(label) => (
+            <span
+              data-slot="tab-split-badge"
+              class="shrink-0 rounded bg-v2-overlay-simple-overlay-hover px-1 py-0.25 text-[10px] leading-3 [font-weight:580] text-v2-text-text-base"
+            >
+              {label()}
+            </span>
+          )}
+        </Show>
         <span data-slot="project-avatar-slot" class="flex size-4 shrink-0 items-center justify-center">
           <Show
             when={props.session}
@@ -426,10 +520,10 @@ export function TabNavItem(props: {
                 })
               }}
             >
-              {language.t("sessionSidebar.action.openSplit")}
+              {language.t("splitView.action.openSplit")}
             </Menu.Item>
             <Menu.Sub>
-              <Menu.SubTrigger>{language.t("sessionSidebar.action.openSplitPosition")}</Menu.SubTrigger>
+              <Menu.SubTrigger>{language.t("splitView.action.openSplitPosition")}</Menu.SubTrigger>
               <Menu.Portal>
                 <Menu.SubContent class="min-w-[150px] [font-family:var(--v2-font-family-sans)]">
                   <Menu.Item
@@ -442,7 +536,7 @@ export function TabNavItem(props: {
                       )
                     }}
                   >
-                    {language.t("sessionSidebar.action.openSplitLeft")}
+                    {language.t("splitView.action.openSplitLeft")}
                   </Menu.Item>
                   <Show when={(split?.count() ?? 1) >= 2}>
                     <Menu.Item
@@ -455,7 +549,7 @@ export function TabNavItem(props: {
                         )
                       }}
                     >
-                      {language.t("sessionSidebar.action.openSplitMiddle")}
+                      {language.t("splitView.action.openSplitMiddle")}
                     </Menu.Item>
                   </Show>
                   <Menu.Item
@@ -468,7 +562,7 @@ export function TabNavItem(props: {
                       )
                     }}
                   >
-                    {language.t("sessionSidebar.action.openSplitRight")}
+                    {language.t("splitView.action.openSplitRight")}
                   </Menu.Item>
                 </Menu.SubContent>
               </Menu.Portal>

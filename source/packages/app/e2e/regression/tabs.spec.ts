@@ -24,199 +24,6 @@ const c = { id: "ses_tab_c", title: "Tab C session" }
 
 test.use({ serviceWorkers: "block" })
 
-test("session sidebar groups history and restores the original tab layout", async ({ page }) => {
-  const permission = {
-    id: "permission-sidebar",
-    sessionID: b.id,
-    action: "shell",
-    resources: ["git status"],
-    metadata: {},
-    save: [],
-  }
-  const requests = [permission]
-  const workspace = await openSession(page, {
-    name: "Sidebar",
-    sessions: [a, b, { ...c, time: { created: 1, updated: 2, idle: 2 } }],
-    sessionID: a.id,
-    sessionStatus: { [b.id]: { type: "busy" } },
-    permissions: () => requests,
-    sessionPermissions: { [b.id]: requests },
-    seed: {
-      tabs: [a.id],
-      settings: { appearance: { tabLayout: "vertical" } },
-      storage: { "opencode.global.dat:session-sidebar.v1": { enabled: true } },
-    },
-  })
-
-  const sidebar = page.getByRole("complementary", { name: "Sessions", exact: true })
-  await expect(page.locator("[data-titlebar-tab-slot]:visible")).toHaveCount(0)
-  await expect(sidebar.getByRole("heading", { name: "Needs input", exact: true })).toBeVisible()
-  await expect(sidebar.getByRole("heading", { name: "Idle", exact: true })).toBeVisible()
-  await expect(sidebar.getByRole("heading", { name: "Ready to review", exact: true })).toHaveCount(0)
-  await expect(sidebar.locator('[data-slot="session-sidebar-unread-dot"]')).toHaveCount(1)
-  await expect(sidebar.getByRole("button", { name: /Tab B session/ })).toBeVisible()
-
-  const viewRequest = page.waitForRequest(
-    (request) =>
-      request.method() === "POST" && new URL(request.url()).pathname === `/api/session/${c.id}/view`,
-  )
-  await sidebar.locator('[data-action="sidebar-filter-menu"]').click()
-  await page.getByRole("menuitem", { name: "Mark all as read", exact: true }).click()
-  await viewRequest
-  await expect(sidebar.locator('[data-slot="session-sidebar-unread-dot"]')).toHaveCount(0)
-  const newer = { ...permission, id: "permission-sidebar-newer" }
-  requests.push(newer)
-  await workspace.push([
-    {
-      id: "evt_sidebar_permission_asked",
-      type: "permission.asked",
-      created: Date.now(),
-      location: { directory: workspace.directory },
-      data: newer,
-    },
-  ])
-  requests.splice(requests.indexOf(newer), 1)
-  const refreshedRequests = page.waitForResponse(
-    (response) =>
-      response.request().method() === "GET" && new URL(response.url()).pathname === `/api/session/${b.id}/permission`,
-  )
-  await workspace.push([
-    {
-      id: "evt_sidebar_newer_replied",
-      type: "permission.replied",
-      created: Date.now(),
-      location: { directory: workspace.directory },
-      data: { sessionID: b.id, requestID: newer.id, reply: "once" },
-    },
-  ])
-  await refreshedRequests
-  await expect(sidebar.getByRole("heading", { name: "Needs input", exact: true })).toBeVisible()
-  requests.splice(0)
-  await workspace.push([
-    {
-      id: "evt_sidebar_permission_replied",
-      type: "permission.replied",
-      created: Date.now(),
-      location: { directory: workspace.directory },
-      data: { sessionID: b.id, requestID: permission.id, reply: "once" },
-    },
-  ])
-  await expect(sidebar.getByRole("heading", { name: "Needs input", exact: true })).toHaveCount(0)
-  await expect(sidebar.getByRole("heading", { name: "Working", exact: true })).toBeVisible()
-
-  const archived = workspace.sessions.find((item) => item.id === c.id)!
-  archived.time = { ...(archived.time as Record<string, number>), archived: Date.now() }
-  await workspace.push([
-    {
-      id: "evt_sidebar_archived",
-      type: "session.archived",
-      created: Date.now(),
-      location: { directory: workspace.directory },
-      data: { sessionID: c.id },
-    },
-  ])
-  await expect(sidebar.getByRole("button", { name: /Tab C session/ })).toHaveCount(0)
-  await sidebar.getByRole("combobox", { name: "Session visibility", exact: true }).selectOption("archived")
-  await expect(sidebar.getByRole("button", { name: /Tab C session/ })).toBeVisible()
-  await sidebar.getByRole("combobox", { name: "Session visibility", exact: true }).selectOption("active")
-  await sidebar.getByRole("combobox", { name: "Group sessions by", exact: true }).selectOption("time")
-  await expect(sidebar.getByRole("heading", { name: "Older", exact: true })).toBeVisible()
-  await sidebar.getByRole("combobox", { name: "Group sessions by", exact: true }).selectOption("project")
-  await expect(sidebar.getByRole("heading", { name: "Sidebar", exact: true })).toBeVisible()
-
-  // Pinning a session shows the Pinned section and persists across switches
-  const rowBWrapper = sidebar.locator('[data-slot="session-sidebar-row-wrapper"]').filter({
-    has: page.locator(`[data-session-id="${b.id}"]`),
-  })
-  await rowBWrapper.first().hover()
-  await rowBWrapper.first().getByRole("button", { name: "Pin session", exact: true }).click()
-  await expect(sidebar.getByRole("heading", { name: "Pinned", exact: true })).toBeVisible()
-  const pinnedSection = sidebar.locator('[data-slot="session-sidebar-pinned"]')
-  await expect(pinnedSection.getByRole("button", { name: /Tab B session/ })).toBeVisible()
-  await pinnedSection.getByRole("button", { name: "Unpin session", exact: true }).click({ force: true })
-  await expect(sidebar.getByRole("heading", { name: "Pinned", exact: true })).toHaveCount(0)
-
-  await sidebar.getByRole("searchbox", { name: "Search sessions", exact: true }).fill(b.title)
-  await expect(sidebar.getByRole("button", { name: /Tab A session/ })).toHaveCount(0)
-  await expect(sidebar.getByRole("button", { name: /Tab C session/ })).toHaveCount(0)
-  await sidebar.getByRole("button", { name: /Tab B session/ }).click()
-  await expectPath(page, sessionHref(b.id))
-  await expectSessionTitle(page, b.title)
-
-  await sidebar.getByRole("button", { name: "Restore tabs", exact: true }).click()
-  await expect(sidebar).toBeHidden()
-  await expect(page.locator('[data-slot="vertical-tabs-sidebar"]')).toBeVisible()
-  const modifier = await page.evaluate(() => (/Mac/.test(navigator.platform) ? "Meta" : "Control"))
-  await page.keyboard.press(`${modifier}+Shift+b`)
-  await expect(sidebar).toBeVisible()
-  await expect(sidebar.getByRole("searchbox", { name: "Search sessions", exact: true })).toHaveValue(b.title)
-  await page.reload()
-  await expect(sidebar.getByRole("searchbox", { name: "Search sessions", exact: true })).toHaveValue(b.title)
-  await expect(sidebar.getByRole("combobox", { name: "Group sessions by", exact: true })).toHaveValue("project")
-})
-
-test("split view supports 2-pane (left/right) and 3-pane (left/middle/right) independent sessions", async ({ page }) => {
-  await openSession(page, {
-    name: "SplitRepo",
-    sessions: [a, b, c],
-    sessionID: a.id,
-    seed: {
-      tabs: [a.id, b.id, c.id],
-      storage: { "opencode.global.dat:session-sidebar.v1": { enabled: true } },
-    },
-  })
-
-  const sidebar = page.getByRole("complementary", { name: "Sessions", exact: true })
-  await expect(sidebar).toBeVisible()
-
-  // Initially in 1-pane mode
-  await expect(page.locator('[data-slot="split-workbench"]')).toHaveCount(0)
-
-  // Open session B in split view (1 -> 2 panes: Left = A, Right = B)
-  const rowB = sidebar.locator('[data-slot="session-sidebar-row-wrapper"]').filter({
-    has: page.locator(`[data-session-id="${b.id}"]`),
-  })
-  await rowB.first().hover()
-  await rowB.first().locator('[data-action="sidebar-open-split"]').click()
-
-  const workbench = page.locator('[data-slot="split-workbench"]')
-  await expect(workbench).toBeVisible()
-  await expect(workbench).toHaveAttribute("data-pane-count", "2")
-  await expect(workbench.locator('[data-slot="split-pane"]')).toHaveCount(2)
-  await expect(workbench.locator('[data-slot="split-pane-position"]')).toHaveText(["Left", "Right"])
-  await expect(workbench.locator('[data-slot="split-pane-title"]')).toHaveText([a.title, b.title])
-
-  // Open session C in split view (2 -> 3 panes: Left = A, Middle = B, Right = C)
-  const rowC = sidebar.locator('[data-slot="session-sidebar-row-wrapper"]').filter({
-    has: page.locator(`[data-session-id="${c.id}"]`),
-  })
-  await rowC.first().hover()
-  await rowC.first().locator('[data-action="sidebar-open-split"]').click()
-
-  await expect(workbench).toHaveAttribute("data-pane-count", "3")
-  await expect(workbench.locator('[data-slot="split-pane"]')).toHaveCount(3)
-  await expect(workbench.locator('[data-slot="split-pane-position"]')).toHaveText(["Left", "Middle", "Right"])
-  await expect(workbench.locator('[data-slot="split-pane-title"]')).toHaveText([a.title, b.title, c.title])
-
-  // Sidebar badges show L, M, R for the 3 open sessions
-  await expect(sidebar.locator('[data-slot="session-sidebar-pane-badge"]')).toHaveText(["L", "M", "R"])
-
-  // Move middle pane left -> order becomes [B, A, C]
-  const middlePane = workbench.locator('[data-slot="split-pane"]').nth(1)
-  await middlePane.locator('[data-action="split-pane-move-left"]').click()
-  await expect(workbench.locator('[data-slot="split-pane-title"]')).toHaveText([b.title, a.title, c.title])
-
-  // Close the right pane -> back to 2 panes [B, A]
-  const rightPane = workbench.locator('[data-slot="split-pane"]').nth(2)
-  await rightPane.locator('[data-action="split-pane-close"]').click()
-  await expect(workbench).toHaveAttribute("data-pane-count", "2")
-  await expect(workbench.locator('[data-slot="split-pane-title"]')).toHaveText([b.title, a.title])
-
-  // Switch back to single pane via layout switcher
-  await sidebar.locator('[data-action="split-layout-1"]').click()
-  await expect(page.locator('[data-slot="split-workbench"]')).toHaveCount(0)
-})
-
 test("tab strip keeps draft tabs as wide as session tabs and navigates on mouse down", async ({ page }) => {
   const workspace = await mockWorkspace(page, {
     name: "Tabs",
@@ -1101,94 +908,6 @@ test("the Windows titlebar menu pastes through the desktop edit action", async (
   await expect(page.getByRole("status", { name: "Desktop menu actions" })).toHaveText("edit.paste")
 })
 
-test("split view supports dragging sessions into left/middle/right panes and dragging pane headers to reorder", async ({
-  page,
-}) => {
-  await page.setViewportSize({ width: 1440, height: 900 })
-  await mockWorkspace(page, {
-    name: "SplitDragWorkspace",
-    sessions: [a, b, c],
-    seed: {
-      storage: { "opencode.global.dat:session-sidebar.v1": { enabled: true } },
-    },
-  })
-  await page.goto(sessionHref(a.id))
-  await expectPath(page, sessionHref(a.id))
-
-  // Initially in 1-pane mode
-  await expect(page.locator('[data-slot="split-workbench"]')).toHaveCount(0)
-
-  const rowB = page.locator(`[data-slot="session-sidebar-row"][data-session-id="${b.id}"]`)
-  const rowC = page.locator(`[data-slot="session-sidebar-row"][data-session-id="${c.id}"]`)
-  const workbenchHost = page.locator('[data-slot="split-workbench-host"]')
-
-  await expect(rowB).toBeVisible()
-  await expect(rowC).toBeVisible()
-
-  // Drag Session B from sidebar into the Right drop zone of the workbench (while in 1-pane mode)
-  const rowBBox = (await rowB.boundingBox())!
-  const hostBox = (await workbenchHost.boundingBox())!
-
-  await page.mouse.move(rowBBox.x + rowBBox.width / 2, rowBBox.y + rowBBox.height / 2)
-  await page.mouse.down()
-  await page.mouse.move(hostBox.x + hostBox.width * 0.75, hostBox.y + hostBox.height * 0.5, { steps: 8 })
-
-  // In 1-pane mode, only 2 drop zones (Left / Right) should appear
-  await expect(page.locator('[data-slot="split-drop-overlay"]')).toBeVisible()
-  await expect(page.locator('[data-slot="split-drop-overlay"]')).toHaveAttribute("data-zone-count", "2")
-  await expect(page.locator('[data-slot="split-drop-zone"]')).toHaveCount(2)
-  await expect(page.locator('[data-slot="split-drop-zone"][data-drop-position="middle"]')).toHaveCount(0)
-  await expect(page.locator('[data-slot="split-drag-preview"]')).toBeVisible()
-  await expect(page.locator('[data-slot="split-drop-zone"][data-drop-position="right"]')).toHaveAttribute(
-    "data-active",
-    "true",
-  )
-
-  await page.screenshot({
-    path: "/Users/mac/.gemini/antigravity/brain/e7d55b92-6430-4f0c-85c1-de66f545535c/split-view-drag-overlay.png",
-  })
-
-  await page.mouse.up()
-
-  // Should now be in 2-pane mode: Left = Tab A session, Right = Tab B session
-  const panes = page.locator('[data-slot="split-pane"]')
-  await expect(panes).toHaveCount(2)
-  await expect(panes.nth(0).locator('[data-slot="split-pane-title"]')).toContainText("Tab A session")
-  await expect(panes.nth(1).locator('[data-slot="split-pane-title"]')).toContainText("Tab B session")
-
-  // In 2-pane mode, dragging Session C from sidebar should now display all 3 drop zones (Left / Middle / Right)
-  const rowCBox = (await rowC.boundingBox())!
-  await page.mouse.move(rowCBox.x + rowCBox.width / 2, rowCBox.y + rowCBox.height / 2)
-  await page.mouse.down()
-  await page.mouse.move(hostBox.x + hostBox.width * 0.5, hostBox.y + hostBox.height * 0.5, { steps: 8 })
-  await expect(page.locator('[data-slot="split-drop-overlay"]')).toHaveAttribute("data-zone-count", "3")
-  await expect(page.locator('[data-slot="split-drop-zone"]')).toHaveCount(3)
-  await expect(page.locator('[data-slot="split-drop-zone"][data-drop-position="middle"]')).toHaveAttribute(
-    "data-active",
-    "true",
-  )
-  await page.mouse.up()
-
-  // Should now be in 3-pane mode: Left = Tab A session, Middle = Tab C session, Right = Tab B session
-  await expect(panes).toHaveCount(3)
-  await expect(panes.nth(0).locator('[data-slot="split-pane-title"]')).toContainText("Tab A session")
-  await expect(panes.nth(1).locator('[data-slot="split-pane-title"]')).toContainText("Tab C session")
-  await expect(panes.nth(2).locator('[data-slot="split-pane-title"]')).toContainText("Tab B session")
-
-  // Drag Left pane header (Tab A session) to the Right drop zone to reorder panes
-  const leftHeader = panes.nth(0).locator('[data-slot="split-pane-header"]')
-  const leftHeaderBox = (await leftHeader.boundingBox())!
-  await page.mouse.move(leftHeaderBox.x + 80, leftHeaderBox.y + leftHeaderBox.height / 2)
-  await page.mouse.down()
-  await page.mouse.move(hostBox.x + hostBox.width * 0.85, hostBox.y + hostBox.height * 0.5, { steps: 8 })
-  await page.mouse.up()
-
-  // Order should now be: Left = Tab C session, Middle = Tab B session, Right = Tab A session
-  await expect(panes.nth(0).locator('[data-slot="split-pane-title"]')).toContainText("Tab C session")
-  await expect(panes.nth(1).locator('[data-slot="split-pane-title"]')).toContainText("Tab B session")
-  await expect(panes.nth(2).locator('[data-slot="split-pane-title"]')).toContainText("Tab A session")
-})
-
 // Server A is the default origin; B is a remote that answers only for its own directories.
 async function twoServers(
   page: Page,
@@ -1223,3 +942,72 @@ async function twoServers(
     tabs: [input.a[0]!.id, { session: input.b[0]!.id, server: REMOTE_SERVER }],
   })
 }
+
+test("split view works standalone with vanilla titlebar tabs without session-sidebar", async ({ page }) => {
+  await mockWorkspace(page, { name: "Tabs", sessions: [a, b, c], seed: { tabs: [a.id, b.id, c.id] } })
+  await page.goto(sessionHref(a.id))
+
+  const switcher = page.locator('[data-slot="split-layout-switcher"]').first()
+  await expect(switcher).toBeVisible()
+
+  const tabA = page.locator(`[data-titlebar-tab-slot]:has(a[href="${sessionHref(a.id)}"])`)
+  const tabB = page.locator(`[data-titlebar-tab-slot]:has(a[href="${sessionHref(b.id)}"])`)
+  const tabC = page.locator(`[data-titlebar-tab-slot]:has(a[href="${sessionHref(c.id)}"])`)
+  await expect(tabA).toBeVisible()
+  await expect(tabB).toBeVisible()
+  await expect(tabC).toBeVisible()
+
+  // 1-pane mode: dragging Tab B downward into the workbench shows ONLY Left and Right drop zones (2 zones),
+  // and keeps Pane 0 on Tab A while dropping Tab B into Right Pane (Pane 1).
+  const tabBBox = await tabB.boundingBox()
+  const workbenchBox = await page.locator('[data-slot="split-workbench-host"]').boundingBox()
+  expect(tabBBox).not.toBeNull()
+  expect(workbenchBox).not.toBeNull()
+
+  await page.mouse.move(tabBBox!.x + tabBBox!.width / 2, tabBBox!.y + tabBBox!.height / 2)
+  await page.mouse.down()
+  await page.mouse.move(
+    workbenchBox!.x + workbenchBox!.width * 0.78,
+    workbenchBox!.y + workbenchBox!.height * 0.5,
+    { steps: 8 },
+  )
+
+  await expect(page.locator('[data-slot="split-drop-overlay"]')).toBeVisible()
+  await expect(page.locator('[data-slot="split-drop-zone"]')).toHaveCount(2)
+  await expect(page.locator('[data-slot="split-drop-zone"][data-drop-position="right"]')).toHaveAttribute(
+    "data-active",
+    "true",
+  )
+
+  await page.mouse.up()
+  await expect(page.locator('[data-slot="split-workbench"]')).toHaveAttribute("data-pane-count", "2")
+  await expect(page.locator('[data-slot="split-pane"][data-pane-index="0"]')).toContainText(a.title)
+  await expect(page.locator('[data-slot="split-pane"][data-pane-index="1"]')).toContainText(b.title)
+
+  // Badges appear on vanilla tabs for Left and Right panes
+  await expect(tabA.locator('[data-slot="tab-split-badge"]')).toBeVisible()
+  await expect(tabB.locator('[data-slot="tab-split-badge"]')).toBeVisible()
+
+  // 2-pane mode: dragging Tab C downward shows Left, Middle, Right drop zones (3 zones)
+  const tabCBox = await tabC.boundingBox()
+  expect(tabCBox).not.toBeNull()
+  await page.mouse.move(tabCBox!.x + tabCBox!.width / 2, tabCBox!.y + tabCBox!.height / 2)
+  await page.mouse.down()
+  await page.mouse.move(
+    workbenchBox!.x + workbenchBox!.width * 0.5,
+    workbenchBox!.y + workbenchBox!.height * 0.5,
+    { steps: 8 },
+  )
+  await expect(page.locator('[data-slot="split-drop-zone"]')).toHaveCount(3)
+  await expect(page.locator('[data-slot="split-drop-zone"][data-drop-position="middle"]')).toHaveAttribute(
+    "data-active",
+    "true",
+  )
+  await page.mouse.up()
+
+  await expect(page.locator('[data-slot="split-workbench"]')).toHaveAttribute("data-pane-count", "3")
+  await expect(page.locator('[data-slot="split-pane"][data-pane-index="0"]')).toContainText(a.title)
+  await expect(page.locator('[data-slot="split-pane"][data-pane-index="1"]')).toContainText(c.title)
+  await expect(page.locator('[data-slot="split-pane"][data-pane-index="2"]')).toContainText(b.title)
+})
+

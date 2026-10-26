@@ -11,10 +11,6 @@ import { useSettingsSurface } from "@/settings/surface"
 import { useSettings } from "@/settings/model"
 import { ExtensionServerCover } from "@/runtime/extension/server-shell"
 import { ExtensionSlot } from "@/runtime/extension/render"
-import { useCommand } from "@/shell/commands/command"
-import { useLanguage } from "@/runtime/i18n/language"
-import { createSidebarPreferences } from "@/shell/session-sidebar/preferences"
-import { SessionSidebar } from "@/shell/session-sidebar/sidebar"
 import { SplitViewProvider } from "@/shell/split-view/context"
 import { SplitWorkbench } from "@/shell/split-view/workbench"
 
@@ -23,30 +19,13 @@ export default function Layout(props: ParentProps) {
   const settings = useSettingsSurface()
   const preferences = useSettings()
   const mobile = createMediaQuery("(max-width: 767px)")
-  const command = useCommand()
-  const language = useLanguage()
-  const [sidebar, setSidebar, , sidebarReady] = createSidebarPreferences()
-  const showSidebar = () => sidebarReady() && sidebar.enabled && !mobile()
-
-  command.register("session-sidebar", () => [
-    {
-      id: "session-sidebar.toggle",
-      title: language.t("sessionSidebar.toggle"),
-      category: language.t("command.category.view"),
-      keybind: "mod+shift+b",
-      onSelect: async () => {
-        await sidebarReady.promise
-        setSidebar("enabled", (enabled) => !enabled)
-      },
-    },
-  ])
 
   const [state, setState] = createStore<{ tabsWidth: number; tabsMount: HTMLElement | undefined }>({
     tabsWidth: 260,
     tabsMount: undefined,
   })
 
-  const verticalTabs = () => preferences.appearance.tabLayout() === "vertical" && !mobile() && !showSidebar()
+  const verticalTabs = () => preferences.appearance.tabLayout() === "vertical" && !mobile()
   const bottomTitlebar = () => mobile() && preferences.general.mobileTitlebarPosition() === "bottom"
 
   return (
@@ -69,14 +48,8 @@ export default function Layout(props: ParentProps) {
               : "max(0px, calc(8px - var(--safe-area-inset-bottom, env(safe-area-inset-bottom, 0px))))",
           }}
         >
-          <Titlebar
-            hideSessionTabs={showSidebar()}
-            verticalTabs={verticalTabs() ? { mount: state.tabsMount } : undefined}
-          />
+          <Titlebar verticalTabs={verticalTabs() ? { mount: state.tabsMount } : undefined} />
           <div class="flex flex-1 min-h-0 min-w-0 flex-row">
-            <Show when={showSidebar()}>
-              <SessionSidebar filter={sidebar} setFilter={setSidebar} close={() => setSidebar("enabled", false)} />
-            </Show>
             <Show when={verticalTabs()}>
               <aside
                 ref={(element) => setState("tabsMount", element)}
